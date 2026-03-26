@@ -3,7 +3,7 @@
 Step 1: Receive, validate, and review patches
 
 Usage:
-    python patch_receive.py /path/to/sharepoint/BHS-B0/2026-03-26/
+    python patch_receive.py /path/to/shared-folder/release-name/2026-03-26/
     python patch_receive.py ./local-patches/
     python patch_receive.py ./local-patches/ --date 2026-03-25   # stage under specific date
     python patch_receive.py ./local-patches/ --force              # overwrite existing session
