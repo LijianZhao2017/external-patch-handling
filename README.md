@@ -7,13 +7,13 @@
 Configure your repo by creating `.patch-pipeline.toml` in the repo root:
 
 ```toml
-release = "BHS-B0"
+release = "release-name"
 working_branch = "main"
 build_command = "make -j$(nproc)"
 unit_test_command = "pytest tests/"
 ```
 
-Or use environment variables: `PATCH_PIPELINE_RELEASE=BHS-B0`, etc.
+Or use environment variables: `PATCH_PIPELINE_RELEASE=release-name`, etc.
 
 ---
 
@@ -21,7 +21,7 @@ Or use environment variables: `PATCH_PIPELINE_RELEASE=BHS-B0`, etc.
 
 ### Step 1 — Receive & Review Patches
 ```bash
-python patch_receive.py /mnt/sharepoint/BHS-B0/2026-03-26/
+python patch_receive.py /mnt/shared-patches/release-name/2026-03-26/
 ```
 Validates each `.patch` file (must be `git format-patch` output), shows diff stats and affected files, runs static checks, stages patches locally.
 
@@ -52,7 +52,7 @@ Runs build check + unit tests automatically. Prompts for silicon test results (P
 ### Step 5 — Generate Report & Integrate
 ```bash
 python patch_report.py          # creates REVIEW_REPORT.md
-# → Upload report to SharePoint, send to sender for blessing
+# → Upload report to the shared folder, send to sender for blessing
 python patch_integrate.py       # after sender says LGTM
 ```
 Report includes: patches table, equivalence check results, test results, LGTM checkbox. Integration cherry-picks from review branch to working branch after confirming sender blessing.
@@ -62,10 +62,10 @@ Report includes: patches table, equivalence check results, test results, LGTM ch
 ## Flow Diagram
 
 ```
-SENDER                        SHAREPOINT                      RECEIVER
+SENDER                        SHARED FOLDER                   RECEIVER
 ──────                        ──────────                      ────────
-git format-patch           →  /BHS-B0/2026-03-26/         ←  1. patch_receive.py
-                                  *.patch                         │
+git format-patch           →  /release-name/2026-03-26/   ←  1. patch_receive.py
+                                   *.patch                         │
                                                              2. patch_apply.py
                                                                (review/<date>/... branch)
                                                                   │
@@ -76,7 +76,7 @@ git format-patch           →  /BHS-B0/2026-03-26/         ←  1. patch_receiv
                                                                (build + unit + silicon)
                                                                   │
                                                              5. patch_report.py
-                            ←  REVIEW_REPORT.md           ←      │
+                             ←  REVIEW_REPORT.md           ←      │
                                                                   │
 SENDER: "LGTM ✅"                                                │
                                                              5. patch_integrate.py
@@ -84,6 +84,16 @@ SENDER: "LGTM ✅"                                                │
                                                                   │
                                                              Build & ship
 ```
+
+### Human-Readable Step Chart
+
+| Step | What happens | Main command | Main output |
+|------|---------------|--------------|-------------|
+| 1 | Receive and validate incoming patches | `python patch_receive.py <incoming-patch-dir>` | Staged patches + `review_data.json` |
+| 2 | Apply patches to a review branch | `python patch_apply.py` | Review branch + `apply_data.json` |
+| 3 | Check functional equivalence | `python patch_check.py` | Match results + `check_data.json` |
+| 4 | Run verification tests | `python patch_test.py` | Build/test status + `test_data.json` |
+| 5 | Create report and integrate after LGTM | `python patch_report.py` then `python patch_integrate.py` | `REVIEW_REPORT.md` + changes integrated to working branch |
 
 ## Troubleshooting
 
@@ -98,7 +108,7 @@ SENDER: "LGTM ✅"                                                │
 ## File Layout
 
 ```
-your-repo/
+repo-root/
 ├── .patch-pipeline.toml       # config (optional)
 ├── .patch-staging/
 │   └── 2026-03-26/

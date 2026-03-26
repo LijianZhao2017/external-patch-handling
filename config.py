@@ -31,8 +31,8 @@ class Config:
     working_branch: str = "main"
     review_branch_prefix: str = "review"
 
-    # SharePoint folder convention: <release>/<date>/
-    release: str = "BHS-B0"
+    # Shared folder convention: <release>/<date>/
+    release: str = "release-name"
 
     # Build & test commands (empty = skip)
     build_command: str = ""
