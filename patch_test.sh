@@ -102,11 +102,12 @@ echo "────────────────────────�
 echo "🔨 Running build: $BUILD_CMD"
 echo "────────────────────────────────────────────────────────────"
 
+BUILD_LOG=$(mktemp)
 BUILD_PASS=true
-if cd "$REPO_PATH" && eval "$BUILD_CMD" > /tmp/build.log 2>&1; then
+if cd "$REPO_PATH" && bash -c "$BUILD_CMD" > "$BUILD_LOG" 2>&1; then
   log_success "Build passed"
 else
-  log_warn "Build failed (see /tmp/build.log)"
+  log_warn "Build failed (see $BUILD_LOG)"
   BUILD_PASS=false
 fi
 
@@ -119,11 +120,12 @@ echo "────────────────────────�
 echo "🧪 Running unit tests: $TEST_CMD"
 echo "────────────────────────────────────────────────────────────"
 
+TEST_LOG=$(mktemp)
 TEST_PASS=true
-if cd "$REPO_PATH" && eval "$TEST_CMD" > /tmp/test.log 2>&1; then
+if cd "$REPO_PATH" && bash -c "$TEST_CMD" > "$TEST_LOG" 2>&1; then
   log_success "Unit tests passed"
 else
-  log_warn "Unit tests failed (see /tmp/test.log)"
+  log_warn "Unit tests failed (see $TEST_LOG)"
   TEST_PASS=false
 fi
 
@@ -145,7 +147,16 @@ echo ""
 SILICON_RESULT="PENDING"
 read -p "Enter silicon test result [PENDING]: " -r input
 if [[ -n "$input" ]]; then
-  SILICON_RESULT=$(echo "$input" | tr '[:lower:]' '[:upper:]')
+  INPUT=$(echo "$input" | tr '[:lower:]' '[:upper:]')
+  case "$INPUT" in
+    PASS|FAIL|PENDING)
+      SILICON_RESULT="$INPUT"
+      ;;
+    *)
+      log_warn "Invalid result '$INPUT' (expected PASS/FAIL/PENDING), using PENDING"
+      SILICON_RESULT="PENDING"
+      ;;
+  esac
 fi
 
 # ============================================================================
@@ -184,8 +195,8 @@ TEST_DATA=$(cat <<EOF
   "test_cmd": "$TEST_CMD",
   "test_pass": $([[ "$TEST_PASS" == "true" ]] && echo "true" || echo "false"),
   "silicon_result": "$SILICON_RESULT",
-  "build_log": "/tmp/build.log",
-  "test_log": "/tmp/test.log"
+  "build_log": "$BUILD_LOG",
+  "test_log": "$TEST_LOG"
 }
 EOF
 )

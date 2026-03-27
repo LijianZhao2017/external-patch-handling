@@ -219,7 +219,7 @@ for patch_file in "${PATCH_FILES[@]}"; do
   done < <(get_patch_info "$patch_file")
   
   # Check file size (arbitrary limit: 10 MB)
-  size_kb=$(($(stat -f%z "$patch_file" 2>/dev/null || stat -c%s "$patch_file") / 1024))
+  size_kb=$(($(stat -c %s "$patch_file") / 1024))
   if [[ $size_kb -gt 10240 ]]; then
     ERRORS+=("$patch_name: Too large ($size_kb KB)")
     continue

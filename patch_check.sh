@@ -95,33 +95,32 @@ calc_similarity() {
   local recv_adds=$3
   local recv_dels=$4
   
-  # Simple metric: matching operations / total operations
-  # This is a rough heuristic
   local total_sent=$((sent_adds + sent_dels))
   local total_recv=$((recv_adds + recv_dels))
   
-  if [[ $total_sent -eq 0 ]]; then
+  # Both empty = 100% match
+  if [[ $total_sent -eq 0 && $total_recv -eq 0 ]]; then
     echo 100
     return
   fi
   
-  # If both have changes, calculate overlap
-  if [[ $total_recv -eq 0 ]]; then
+  # One empty, other not = 0% match
+  if [[ $total_sent -eq 0 || $total_recv -eq 0 ]]; then
     echo 0
     return
   fi
   
-  # Simple similarity: min(adds)/max(adds) * min(dels)/max(dels) * 100
-  local adds_ratio
-  adds_ratio=$(echo "scale=2; $([ $sent_adds -lt $recv_adds ] && echo $sent_adds || echo $recv_adds) * 100 / $([ $sent_adds -gt $recv_adds ] && echo $sent_adds || echo $recv_adds)" | bc)
+  # Calculate overlap: what percentage of sender changes are present in receiver
+  # Simple metric: min adds and dels as percentage of sent
+  local matched=0
+  if [[ $sent_adds -gt 0 ]]; then
+    matched=$((recv_adds * 100 / sent_adds))
+  fi
+  if [[ $sent_dels -gt 0 ]]; then
+    matched=$(((matched + recv_dels * 100 / sent_dels) / 2))
+  fi
   
-  local dels_ratio
-  dels_ratio=$(echo "scale=2; $([ $sent_dels -lt $recv_dels ] && echo $sent_dels || echo $recv_dels) * 100 / $([ $sent_dels -gt $recv_dels ] && echo $sent_dels || echo $recv_dels)" | bc)
-  
-  local avg_ratio
-  avg_ratio=$(echo "scale=0; ($adds_ratio + $dels_ratio) / 2" | bc)
-  
-  echo "$avg_ratio"
+  echo "$matched"
 }
 
 # ============================================================================
@@ -147,6 +146,9 @@ fi
 # ============================================================================
 
 REVIEW_BRANCH=$(grep -oP '"branch":\s*"\K[^"]+' "$APPLY_DATA_FILE")
+if [[ -z "$REVIEW_BRANCH" ]]; then
+  die "Could not extract review branch from apply_data.json"
+fi
 log_info "Checking equivalence for $REVIEW_BRANCH"
 
 PATCHES=($(find "$STAGING_DIR" -maxdepth 1 -name "*.patch" -type f | sort))
@@ -176,19 +178,24 @@ for patch_file in "${PATCHES[@]}"; do
     fi
   done < <(grep "^diff --git" "$patch_file" | sed 's|^diff --git a/||; s| b/.*||')
   
-  # Count sender's adds/dels per file
+  # Count sender's adds/dels per file using awk
   while IFS=':' read -r file adds dels; do
     if [[ -n "$file" ]]; then
       PATCH_ADDS["$file"]=$((${PATCH_ADDS["$file"]:-0} + adds))
       PATCH_DELS["$file"]=$((${PATCH_DELS["$file"]:-0} + dels))
     fi
   done < <(
-    grep "^diff --git a/" "$patch_file" | while read -r line; do
-      file=$(echo "$line" | sed 's|^diff --git a/||; s| b/.*||')
-      adds=$(grep "^+[^+]" "$patch_file" | grep -c . || echo 0)
-      dels=$(grep "^-[^-]" "$patch_file" | grep -c . || echo 0)
-      echo "$file:$adds:$dels"
-    done
+    awk '
+      /^diff --git a\// {
+        if (file != "") print file ":" adds ":" dels
+        file=$4; gsub(/^a\//, "", file); gsub(/ b\/.*/, "", file)
+        adds=0; dels=0
+        next
+      }
+      /^+[^+]/ && file != "" { adds++ }
+      /^-[^-]/ && file != "" { dels++ }
+      END { if (file != "") print file ":" adds ":" dels }
+    ' "$patch_file"
   )
 done
 
