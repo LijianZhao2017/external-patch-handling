@@ -122,41 +122,6 @@ validate_patch() {
   return 0
 }
 
-# Extract patch metadata
-get_patch_info() {
-  local patch_file="$1"
-  
-  local subject=""
-  local author=""
-  local files_count=0
-  local insertions=0
-  local deletions=0
-  local file_list=""
-  
-  subject=$(grep -m1 "^Subject:" "$patch_file" | sed 's/^Subject: \[PATCH[^]]*\] *//')
-  author=$(grep -m1 "^From:" "$patch_file" | sed 's/^From: *//')
-  
-  # Extract changed files from diff --git lines
-  file_list=$(grep "^diff --git" "$patch_file" | sed 's|^diff --git a/||; s| b/.*||' | sort -u)
-  files_count=$(echo "$file_list" | grep -c . || echo 0)
-  
-  # Try to extract insertions/deletions from stat line
-  local stat_line
-  stat_line=$(grep " files? changed" "$patch_file" | tail -1)
-  if [[ -n "$stat_line" ]]; then
-    insertions=$(echo "$stat_line" | grep -oP '\+\+\+|\K\d+(?= insertions)' | head -1 || echo 0)
-    deletions=$(echo "$stat_line" | grep -oP '\-\-\-|\K\d+(?= deletions)' | head -1 || echo 0)
-  fi
-  
-  # Output as key=value pairs
-  echo "subject=$subject"
-  echo "author=$author"
-  echo "files_count=$files_count"
-  echo "insertions=$insertions"
-  echo "deletions=$deletions"
-  echo "files=$file_list"
-}
-
 # ============================================================================
 # Validation
 # ============================================================================
@@ -213,10 +178,13 @@ for patch_file in "${PATCH_FILES[@]}"; do
   fi
   
   # Get patch info
-  declare -A info
-  while IFS='=' read -r key value; do
-    info[$key]="$value"
-  done < <(get_patch_info "$patch_file")
+  subject=$(grep -m1 "^Subject:" "$patch_file" | sed 's/^Subject: \[PATCH[^]]*\] *//')
+  author=$(grep -m1 "^From:" "$patch_file" | sed 's/^From: *//')
+  file_list=$(grep "^diff --git" "$patch_file" | sed 's|^diff --git a/||; s| b/.*||' | sort -u)
+  files_count=$(echo "$file_list" | grep -c . || echo 0)
+  stat_line=$(grep " files\\? changed" "$patch_file" | tail -1 || true)
+  insertions=$(echo "$stat_line" | grep -oP '\d+(?= insertions)' | head -1 || echo 0)
+  deletions=$(echo "$stat_line" | grep -oP '\d+(?= deletions)' | head -1 || echo 0)
   
   # Check file size (arbitrary limit: 10 MB)
   size_kb=$(($(stat -c %s "$patch_file") / 1024))
@@ -227,26 +195,26 @@ for patch_file in "${PATCH_FILES[@]}"; do
   
   # Display patch info
   echo "────────────────────────────────────────────────────────────"
-  echo "Patch: ${info[subject]}"
-  echo "  Author : ${info[author]}"
-  echo "  Changes: ${info[files_count]} file(s)  +${info[insertions]}/-${info[deletions]}"
+  echo "Patch: $subject"
+  echo "  Author : $author"
+  echo "  Changes: $files_count file(s)  +$insertions/-$deletions"
   
   # List first 10 files
-  if [[ -n "${info[files]}" ]]; then
-    echo "${info[files]}" | head -10 | sed 's/^/    • /'
-    local file_count=$(echo "${info[files]}" | grep -c . || echo 0)
+  if [[ -n "$file_list" ]]; then
+    echo "$file_list" | head -10 | sed 's/^/    • /'
+    file_count=$(echo "$file_list" | grep -c . || echo 0)
     if [[ $file_count -gt 10 ]]; then
       echo "    ... and $((file_count - 10)) more"
     fi
   fi
   
   # Check for binary files
-  local patch_warnings=()
+  patch_warnings=()
   while IFS= read -r file; do
     if is_binary_file "$file"; then
       patch_warnings+=("Binary file: $file")
     fi
-  done < <(echo "${info[files]}")
+  done < <(echo "$file_list")
   
   if [[ ${#patch_warnings[@]} -gt 0 ]]; then
     for w in "${patch_warnings[@]}"; do
@@ -258,7 +226,7 @@ for patch_file in "${PATCH_FILES[@]}"; do
   # Copy patch to staging
   cp "$patch_file" "$STAGING_DIR/$patch_name"
   VALID_PATCHES+=("$patch_file")
-  PATCH_INFOS+=("${info[subject]}")
+  PATCH_INFOS+=("$subject")
 done
 
 # ============================================================================
@@ -297,3 +265,48 @@ fi
 if [[ ${#WARNINGS_TOTAL[@]} -gt 0 ]]; then
   log_warn "Total warnings: ${#WARNINGS_TOTAL[@]}"
 fi
+
+python3 - "$STAGING_DIR" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+
+def parse_patch(path: Path) -> dict:
+    content = path.read_text(errors="replace")
+    subject = ""
+    author = ""
+    date = ""
+    for line in content.splitlines()[:60]:
+        if line.startswith("Subject:"):
+            subject = re.sub(r"\[PATCH[^\]]*\]\s*", "", line[len("Subject:"):].strip())
+        elif line.startswith("From:"):
+            author = line[len("From:"):].strip()
+        elif line.startswith("Date:"):
+            date = line[len("Date:"):].strip()
+    files = sorted(set(re.findall(r"diff --git a/(.+?) b/", content)))
+    stat = re.search(
+        r"(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?",
+        content,
+    )
+    return {
+        "file": path.name,
+        "subject": subject,
+        "author": author,
+        "date": date,
+        "files": files,
+        "files_changed": int(stat.group(1)) if stat else len(files),
+        "insertions": int(stat.group(2) or 0) if stat else 0,
+        "deletions": int(stat.group(3) or 0) if stat else 0,
+    }
+
+
+staging = Path(sys.argv[1])
+review_data = {
+    "patches": [parse_patch(p) for p in sorted(staging.glob("*.patch"))],
+    "all_warnings": [],
+    "reviewer_notes": {},
+}
+(staging / "review_data.json").write_text(json.dumps(review_data, indent=2))
+PY
