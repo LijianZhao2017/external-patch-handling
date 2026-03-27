@@ -13,13 +13,17 @@ python -m pip install -r requirements-dev.txt
 Configure your repo by creating `.patch-pipeline.toml` in the repo root:
 
 ```toml
-release = "release-name"
-working_branch = "main"
+release = "bhs_pb2_35d44"
+base_branch = "release/bhs_pb2_35d44"
 build_command = "make -j$(nproc)"
 unit_test_command = "pytest tests/"
 ```
 
-Or use environment variables: `PATCH_PIPELINE_RELEASE=release-name`, etc.
+If `base_branch` is omitted, the pipeline derives it as `release/<release>` when
+`release` is set; otherwise it falls back to `working_branch`/`main`.
+
+Or use environment variables: `PATCH_PIPELINE_RELEASE=release-name`,
+`PATCH_PIPELINE_BASE_BRANCH=release/bhs_pb2_35d44`, etc.
 
 ---
 
@@ -35,13 +39,20 @@ Validates each `.patch` file (must be `git format-patch` output), shows diff sta
 ```bash
 python patch_apply.py
 ```
-Creates `review/2026-03-26/<patch-slug>` branch and applies patches with `git am --3way`. Pauses on conflict for manual resolution.
+Creates `review/2026-03-26/<patch-slug>` from the configured base branch and
+applies patches with `git am --3way`. If the base branch exists only as
+`origin/<branch>`, the pipeline creates a local tracking branch automatically.
+Pauses on conflict for manual resolution.
 
 ### Step 3 — Functional Equivalence Check ⭐
 ```bash
 python patch_check.py
 ```
-**Key step.** Compares what the sender *intended* (their patch) vs what *actually landed* on the receiver side (`git diff main..review-branch`). Because codebases diverge through refactoring, the line numbers and context differ — this tool checks that the same logical changes (added/removed content per file) are present.
+**Key step.** Compares what the sender *intended* (their patch) vs what
+*actually landed* on the receiver side (`git diff <base-branch>..review-branch`).
+Because codebases diverge through refactoring, the line numbers and context
+differ — this tool checks that the same logical changes (added/removed content
+per file) are present.
 
 - **MATCH** (≥75% similarity) — Same logical change landed correctly
 - **PARTIAL** (40–75%) — Change partially present; review the side-by-side diff
@@ -61,7 +72,9 @@ python patch_report.py          # creates REVIEW_REPORT.md
 # → Upload report to the shared folder, send to sender for blessing
 python patch_integrate.py       # after sender says LGTM
 ```
-Report includes: patches table, equivalence check results, test results, LGTM checkbox. Integration cherry-picks from review branch to working branch after confirming sender blessing.
+Report includes: patches table, equivalence check results, test results, LGTM
+checkbox. Integration cherry-picks from the review branch back to the configured
+base branch after confirming sender blessing.
 
 ---
 
