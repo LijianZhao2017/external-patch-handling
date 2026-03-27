@@ -4,6 +4,12 @@
 
 > **Requirements:** Python 3.11+, git (receiver side only)
 
+Install unit test tooling:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
 Configure your repo by creating `.patch-pipeline.toml` in the repo root:
 
 ```toml
@@ -122,6 +128,8 @@ SENDER: "LGTM ✅"                                                │
 
 ```
 repo-root/
+├── pyproject.toml             # centralized project/test tool config
+├── requirements-dev.txt       # development dependencies (pytest)
 ├── .patch-pipeline.toml       # config (optional)
 ├── .patch-staging/
 │   └── 2026-03-26/
