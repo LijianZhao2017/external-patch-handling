@@ -29,6 +29,7 @@ class Config:
 
     # Branch names
     working_branch: str = "main"
+    base_branch: str = ""
     review_branch_prefix: str = "review"
 
     # Shared folder convention: <release>/<date>/
@@ -85,3 +86,13 @@ class Config:
     @property
     def staging_path(self) -> Path:
         return self.repo_path / self.staging_dir
+
+    @property
+    def resolved_working_branch(self) -> str:
+        if self.base_branch:
+            return self.base_branch
+        if self.working_branch != "main":
+            return self.working_branch
+        if self.release and self.release != "release-name":
+            return f"release/{self.release}"
+        return self.working_branch

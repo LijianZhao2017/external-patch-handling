@@ -97,6 +97,10 @@ def generate_report(staging_dir: Path, cfg: Config) -> str:
         if apply.get("failed"):
             fail = apply["failed"]
             lines.append(f"- **⚠️ Conflict**: Stopped at patch {fail.get('index', '?')} (`{fail.get('patch', '?')}`)")
+            if fail.get("stripped_prefix"):
+                lines.append(f"- **Root prefix mismatch**: Detected leading `{fail['stripped_prefix']}/` and stripped it for diagnostics")
+            if fail.get("apply_check_error"):
+                lines.append(f"- **Plain apply check**: `{fail['apply_check_error'][:240]}`")
         else:
             lines.append(f"- **Conflicts**: None ✅")
 

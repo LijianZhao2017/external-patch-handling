@@ -18,12 +18,13 @@ import sys
 from pathlib import Path
 
 from config import Config
-from utils import GitError, ensure_clean_worktree, git_run, today_str
+from utils import GitError, ensure_clean_worktree, ensure_local_branch, git_run, today_str
 
 
 def integrate_patches(staging_dir: Path, cfg: Config) -> None:
     """Cherry-pick review branch commits to working branch."""
     repo = cfg.repo_path
+    base_branch = cfg.resolved_working_branch
 
     # Load apply data to find the review branch
     apply_file = staging_dir / "apply_data.json"
@@ -53,7 +54,7 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
 
     # Sender blessing gate
     print(f"\n{'─' * 60}")
-    print(f"Integration: {branch} → {cfg.working_branch}")
+    print(f"Integration: {branch} → {base_branch}")
     print(f"Commits to cherry-pick: {len(applied)}")
     for c in applied:
         print(f"  {c['hash']}  {c['subject'][:60]}")
@@ -70,14 +71,19 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
 
     # Ensure clean worktree
     try:
-        ensure_clean_worktree(repo)
+        ensure_clean_worktree(repo, ignored_paths=[cfg.staging_dir])
     except GitError as e:
         print(f"❌ {e}")
         sys.exit(1)
 
     # Switch to working branch
-    print(f"\n🔄 Switching to {cfg.working_branch}...")
-    git_run("checkout", cfg.working_branch, cwd=repo)
+    print(f"\n🔄 Switching to {base_branch}...")
+    try:
+        ensure_local_branch(repo, base_branch)
+        git_run("checkout", base_branch, cwd=repo)
+    except GitError as e:
+        print(f"❌ {e}")
+        sys.exit(1)
 
     # Cherry-pick each commit
     print(f"🍒 Cherry-picking {len(applied)} commit(s)...\n")
@@ -112,11 +118,11 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
 
     print(f"\n{'─' * 60}")
     if len(picked) == len(applied):
-        print(f"✅ All {len(picked)} commits cherry-picked to {cfg.working_branch}!")
+        print(f"✅ All {len(picked)} commits cherry-picked to {base_branch}!")
         print(f"\nNext steps:")
         print(f"  1. Review: git log --oneline -{len(picked)}")
-        print(f"  2. Push:   git push origin {cfg.working_branch}")
-        print(f"  3. Build from {cfg.working_branch}")
+        print(f"  2. Push:   git push origin {base_branch}")
+        print(f"  3. Build from {base_branch}")
     else:
         print(f"⚠️  Cherry-picked {len(picked)}/{len(applied)} commits (conflict encountered)")
 

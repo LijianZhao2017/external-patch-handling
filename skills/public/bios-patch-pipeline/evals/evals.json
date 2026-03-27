@@ -1,0 +1,38 @@
+{
+  "skill_name": "bios-patch-pipeline",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Please test /mnt/c/temp/GNR_PATCH_v13_change14-15_260320.7z against ~/OKS/Intel. I do not want to hand-pick a feature branch; use the right review flow and base it on bhs_pb2_35d44.",
+      "expected_output": "The skill extracts the archive, derives release/bhs_pb2_35d44 as the base branch, creates a review branch, and reports whether the apply failure is due to path-root mismatch, missing 3-way ancestor data, or real hunk drift.",
+      "files": [],
+      "expectations": [
+        "The workflow derives or uses release/bhs_pb2_35d44 as the base branch instead of demanding a pre-created feature branch.",
+        "The report distinguishes path-root mismatch from ancestor-data failure.",
+        "The output includes a structured patch pipeline report with next actions."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I have a directory of git format-patch files at ~/incoming/pb2-fixes. Review them onto ~/OKS/Intel from release/bhs_pb2_35d44 and tell me the first patch that blocks the series.",
+      "expected_output": "The skill validates the patch series, prepares the release base, attempts apply on a review branch, and clearly identifies the first failing patch and failure signature.",
+      "files": [],
+      "expectations": [
+        "The workflow validates the patch headers before apply.",
+        "The output identifies the first failing patch and file if apply is blocked.",
+        "The output leaves the user with clear next actions."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "A patch from another team will not apply to my Intel BIOS tree. Please figure out whether it is because the patch was generated from one directory higher, because git am cannot build a 3-way ancestor, or because the code really drifted.",
+      "expected_output": "The skill runs the preflight diagnostics, classifies the failure mode, and explains the reasoning instead of collapsing everything into a generic merge conflict.",
+      "files": [],
+      "expectations": [
+        "The workflow includes a preflight path-root check.",
+        "The output calls out sha1/fake-ancestor failures separately from content conflicts.",
+        "The final report uses the failure interpretation guide rather than a generic 'merge conflict' label."
+      ]
+    }
+  ]
+}
