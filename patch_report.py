@@ -161,7 +161,6 @@ def generate_report(staging_dir: Path, cfg: Config) -> str:
     lines.append(f"- [ ] **Changes Requested** — See notes above. Sender should revise and resubmit.")
     lines.append(f"")
     lines.append(f"---")
-    lines.append(f"_Reviewer signature: ___________________________  Date: _________ _")
 
     return "\n".join(lines)
 

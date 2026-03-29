@@ -166,6 +166,31 @@ echo ""
 # Build map of sender intent (patches) vs receiver reality (git diff)
 # ============================================================================
 
+# Detect repo-root prefix from sender patch paths (e.g. "Intel/Pkg/foo.c" → "Pkg/foo.c")
+REPO_NAME=$(basename "$REPO_PATH")
+STRIP_PREFIX=""
+_all_match=true
+for patch_file in "${PATCHES[@]}"; do
+  while IFS= read -r file; do
+    if [[ -n "$file" ]]; then
+      if [[ "$file" == "$REPO_NAME/"* ]]; then
+        stripped="${file#"$REPO_NAME/"}"
+        if [[ -e "$REPO_PATH/$file" || ! -e "$REPO_PATH/$stripped" ]]; then
+          _all_match=false
+          break
+        fi
+      else
+        _all_match=false
+        break
+      fi
+    fi
+  done < <(grep "^diff --git" "$patch_file" | sed 's|^diff --git a/||; s| b/.*||')
+  $_all_match || break
+done
+if $_all_match; then
+  STRIP_PREFIX="$REPO_NAME"
+fi
+
 declare -A PATCH_FILES
 declare -A PATCH_ADDS
 declare -A PATCH_DELS
@@ -174,6 +199,7 @@ declare -A PATCH_DELS
 for patch_file in "${PATCHES[@]}"; do
   while IFS= read -r file; do
     if [[ -n "$file" ]]; then
+      [[ -n "$STRIP_PREFIX" && "$file" == "$STRIP_PREFIX/"* ]] && file="${file#"$STRIP_PREFIX/"}"
       PATCH_FILES["$file"]=1
     fi
   done < <(grep "^diff --git" "$patch_file" | sed 's|^diff --git a/||; s| b/.*||')
@@ -181,6 +207,7 @@ for patch_file in "${PATCHES[@]}"; do
   # Count sender's adds/dels per file using awk
   while IFS=':' read -r file adds dels; do
     if [[ -n "$file" ]]; then
+      [[ -n "$STRIP_PREFIX" && "$file" == "$STRIP_PREFIX/"* ]] && file="${file#"$STRIP_PREFIX/"}"
       PATCH_ADDS["$file"]=$((${PATCH_ADDS["$file"]:-0} + adds))
       PATCH_DELS["$file"]=$((${PATCH_DELS["$file"]:-0} + dels))
     fi
