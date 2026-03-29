@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 from config import Config
-from utils import format_table, git_run, list_patches, today_str
+from utils import detect_patch_root_prefix, format_table, git_run, list_patches, today_str
 
 
 # ── Diff parsing ────────────────────────────────────────────────────────────
@@ -137,6 +137,11 @@ def check_equivalence(staging_dir: Path, cfg: Config) -> dict:
         sys.exit(1)
     sender_text = "\n".join(p.read_text(errors="replace") for p in sender_patches)
     sender_files = _parse_diff_into_files(sender_text)
+
+    # Strip redundant repo-root prefix from sender paths (e.g. "Intel/Pkg/foo.c" → "Pkg/foo.c")
+    prefix = detect_patch_root_prefix(list(sender_files.keys()), repo)
+    if prefix:
+        sender_files = {k[len(prefix) + 1:]: v for k, v in sender_files.items()}
 
     # Get the base from the parent of the first applied commit — more reliable
     # than branch name, handles master/main differences and detached HEAD cases
