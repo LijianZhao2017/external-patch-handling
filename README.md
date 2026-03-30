@@ -1,5 +1,7 @@
 # Patch Review Pipeline
 
+[中文文档](README_CN.md)
+
 > **Requirements:** Python 3.11+, git (receiver side only)
 
 ```bash
