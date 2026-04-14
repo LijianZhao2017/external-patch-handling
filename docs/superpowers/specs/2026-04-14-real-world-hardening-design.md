@@ -54,6 +54,11 @@ class Config:
 - `PATCH_PIPELINE_VENDOR_MARKER_ACTION=strip`
 - `PATCH_PIPELINE_DESIGN_DOCS=/path/to/spec.pdf,/path/to/another.pdf`
 
+**Config.load() type handling additions:**
+- `bool` fields: parse via `val.lower() in ("1", "true", "yes")`
+- `list[str]` fields: split by comma (like existing `allowed_path_prefixes`)
+- `vendor_marker_action`: validate against `("warn", "strip")`, raise on unknown
+
 **TOML example:**
 ```toml
 normalize_line_endings = true
@@ -71,7 +76,7 @@ Returns `True` if the file contains `\r\n` sequences. Reads first 8KB in binary 
 Converts `\r\n` → `\n`. Returns the text unchanged if no CRLF found.
 
 #### `normalize_patch_file(src: Path, dest: Path) -> dict`
-Reads `src` in binary, normalizes CRLF→LF, writes to `dest`. Returns a manifest dict:
+Reads `src` in **binary mode**, performs `b"\r\n"` → `b"\n"` byte replacement (no decode/encode round-trip — safe for non-ASCII author names and commit messages), writes to `dest`. Returns a manifest dict:
 ```python
 {"original": str(src), "prepared": str(dest), "crlf_normalized": True, "original_size": 1234, "prepared_size": 1200}
 ```
@@ -80,7 +85,7 @@ Reads `src` in binary, normalizes CRLF→LF, writes to `dest`. Returns a manifes
 Scans patch content for vendor marker lines. Returns list of `{"line_num": N, "text": "//CXSH+", "pattern": "..."}`. Only scans added lines (`+` prefix in diff hunks) — not commit messages.
 
 #### `strip_vendor_markers(text: str, patterns: list[str]) -> tuple[str, int]`
-Removes lines matching vendor marker patterns from diff `+` lines. Returns `(cleaned_text, count_removed)`. Only operates on diff hunk content, never commit message body.
+Removes lines matching vendor marker patterns from **source code files** (not patches). Used post-apply as a fixup commit when `vendor_marker_action = "strip"`. Returns `(cleaned_text, count_removed)`. Operates on full file content using `read_bytes()`/`write_bytes()` to preserve line endings.
 
 ### 3. Step 1 Enhancement — `patch_receive.py`
 
@@ -97,19 +102,21 @@ Stores document references in `review_data.json` under `"design_docs"` key. Thes
 
 **Prepare sub-phase** (runs after validation, before staging complete):
 
-1. For each valid patch, create `<name>.prepared.patch` alongside `<name>.patch` in staging dir
-2. Apply transforms:
-   - CRLF→LF normalization (if `normalize_line_endings = True`)
-   - Vendor marker stripping (if `vendor_marker_action = "strip"`)
-3. Write `prepare_manifest.json` recording all transforms applied per patch
-4. If no transforms needed, `prepared.patch` is a copy of original
+1. For each valid patch, create a copy under `prepared/` subdirectory (same filename, different dir)
+2. Apply transforms to the prepared copy:
+   - CRLF→LF normalization (if `normalize_line_endings = True`) — **binary** `b"\r\n"` → `b"\n"` replacement, no decode/encode round-trip to avoid corrupting non-ASCII content
+   - Vendor marker warning detection (always)
+   - Note: vendor marker stripping from patches is deferred — "strip" mode will operate post-apply as a fixup commit to avoid hunk header rewriting complexity
+3. Write `prepared/manifest.json` recording all transforms applied per patch
+4. If no transforms needed, prepared copy is identical to original
 
 **Staging directory layout change:**
 ```
 .patch-staging/2026-04-14/
 ├── 0001-fix-timing.patch              # original (immutable)
-├── 0001-fix-timing.prepared.patch     # normalized copy (used by Step 2)
-├── prepare_manifest.json              # transform audit log
+├── prepared/                          # normalized copies (used by Step 2)
+│   ├── 0001-fix-timing.patch          # same name, normalized
+│   └── manifest.json                  # transform audit log
 ├── review_data.json                   # existing
 ├── apply_data.json                    # existing (Step 2)
 ├── check_data.json                    # existing (Step 3)
@@ -117,14 +124,16 @@ Stores document references in `review_data.json` under `"design_docs"` key. Thes
 └── REVIEW_REPORT.md                   # existing (Step 5)
 ```
 
+This layout avoids the glob collision where `list_patches()` (`directory.glob("*.patch")`) would match both original and prepared patches if they were siblings.
+
 ### 4. Step 2 Enhancement — `patch_apply.py`
 
-**Use prepared patch:** `_prepare_patch_for_repo()` reads from `.prepared.patch` if it exists, otherwise falls back to `.patch`.
+**Use prepared patch:** Read from `prepared/<name>.patch` if the `prepared/` subdirectory exists, otherwise fall back to the original `.patch`.
 
 **Apply strategy — strict-then-fallback:**
 1. Try `git am --3way` with prepared patch
-2. On failure, abort and retry with `git am --3way --ignore-whitespace`
-3. On second failure, abort and fallback to `git apply --ignore-whitespace` + manual commit preserving:
+2. On failure: run `git am --abort` to clean up, verify worktree is clean, then retry with `git am --3way --ignore-whitespace`
+3. On second failure: run `git am --abort`, verify clean worktree, then fallback to `git apply --ignore-whitespace` + manual commit preserving:
    - Author name/email from patch header
    - Author date from patch header
    - Commit subject/body from patch header
@@ -138,7 +147,7 @@ Stores document references in `review_data.json` under `"design_docs"` key. Thes
    ```
 
 **Fallback metadata preservation:**
-When using `git apply` fallback, extract author/date/subject from `parse_patch_header()` and commit with:
+When using `git apply` fallback, extract author/date/subject/body from the patch. Extend `parse_patch_header()` to also return `"body"` — the commit message text between the `Subject:` continuation and the `---` separator (handling RFC 2822 multi-line subjects). Commit with:
 ```bash
 git commit --author="Name <email>" --date="date" -m "subject\n\nbody"
 ```
@@ -147,7 +156,7 @@ git commit --author="Name <email>" --date="date" -m "subject\n\nbody"
 
 **New: Style sub-check (separate from equivalence)**
 
-After computing equivalence, run a style scan on the files actually changed by the patch. Checks:
+After computing equivalence, run a style scan on **lines introduced by the patch** (lines with `+` prefix in `git diff base..review` — not the entire file, to avoid false positives from pre-existing issues). Checks:
 
 | Check | Description |
 |-------|-------------|
