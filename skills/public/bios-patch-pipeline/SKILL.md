@@ -73,7 +73,7 @@ Capture:
 **CRLF detection:** Check each patch file for CRLF line endings (`\r\n`). This is the most common cause of `git am` failure on cross-platform patches — context lines won't match when the patch has CRLF but the repo has LF (or vice versa). If detected:
 
 - Report the finding clearly before attempting apply
-- Create a normalized copy with binary `b"\r\n"` → `b"\n"` replacement (no text-mode decode — preserves non-ASCII author names)
+- Create a normalized copy (in a `prepared/` subdirectory to avoid glob collision with originals) with binary `b"\r\n"` → `b"\n"` replacement (no text-mode decode — preserves non-ASCII author names)
 - Use the normalized copy for apply attempts
 
 **Vendor marker detection:** Scan added lines (lines starting with `+` in diff hunks, not commit messages) for vendor-specific annotations like `//CXSH+`, `//CXSH-`, `//VENDOR+`, etc. Common patterns: `//\w+\+\s*$` and `//\w+-\s*$`. Report any findings — these are change delimiters used by external vendors but not present in Intel codebases. They should be removed post-apply.
@@ -146,7 +146,8 @@ This is the most critical step. External vendor patches frequently fail on first
 1. Run `git am --abort` to clean up
 2. Verify worktree is clean
 3. Try `git apply --ignore-whitespace <patch>`
-4. If it applies, create a commit preserving original metadata:
+4. Stage the applied changes: `git add -A`
+5. If it applies, create a commit preserving original metadata:
    - Author name/email from patch header
    - Author date from patch header
    - Subject and body from patch header

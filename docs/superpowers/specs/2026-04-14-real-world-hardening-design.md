@@ -73,7 +73,8 @@ design_docs = ["docs/spec.pdf"]
 Returns `True` if the file contains `\r\n` sequences. Reads first 8KB in binary mode.
 
 #### `normalize_line_endings(text: str) -> str`
-Converts `\r\n` → `\n`. Returns the text unchanged if no CRLF found.
+Converts `\r\n` → `\n` in already-decoded text. Returns the text unchanged if no CRLF found.
+**Note:** Do NOT use for patch file normalization — use `normalize_patch_file()` instead, which operates in binary mode to avoid decode/encode round-trip corruption.
 
 #### `normalize_patch_file(src: Path, dest: Path) -> dict`
 Reads `src` in **binary mode**, performs `b"\r\n"` → `b"\n"` byte replacement (no decode/encode round-trip — safe for non-ASCII author names and commit messages), writes to `dest`. Returns a manifest dict:
@@ -84,15 +85,15 @@ Reads `src` in **binary mode**, performs `b"\r\n"` → `b"\n"` byte replacement 
 #### `detect_vendor_markers(text: str, patterns: list[str]) -> list[dict]`
 Scans patch content for vendor marker lines. Returns list of `{"line_num": N, "text": "//CXSH+", "pattern": "..."}`. Only scans added lines (`+` prefix in diff hunks) — not commit messages.
 
-#### `strip_vendor_markers(text: str, patterns: list[str]) -> tuple[str, int]`
-Removes lines matching vendor marker patterns from **source code files** (not patches). Used post-apply as a fixup commit when `vendor_marker_action = "strip"`. Returns `(cleaned_text, count_removed)`. Operates on full file content using `read_bytes()`/`write_bytes()` to preserve line endings.
+#### `strip_vendor_markers(path: Path, patterns: list[str]) -> int`
+Removes lines matching vendor marker patterns from **source code files** (not patches). Used post-apply as a fixup commit when `vendor_marker_action = "strip"`. Reads/writes in binary mode (`read_bytes()`/`write_bytes()`) to preserve line endings. Returns count of removed lines.
 
 ### 3. Step 1 Enhancement — `patch_receive.py`
 
 **New static checks in `_static_checks()`:**
 
 - **CRLF detection**: Flag if patch file has CRLF. Severity: warning (informational, will be normalized in prepare phase).
-- **Vendor marker detection**: Scan added lines for configured patterns. Severity: warning (default). If `vendor_marker_action = "strip"`, markers will be removed in the prepare sub-phase.
+- **Vendor marker detection**: Scan added lines for configured patterns. Severity: warning (default). If `vendor_marker_action = "strip"`, stripping is deferred to post-apply (see Step 2 Enhancement) to avoid hunk header rewriting.
 
 **New `--design-doc` CLI argument:**
 ```
@@ -247,7 +248,7 @@ CRLF_PATCH = (
 
 - All changes are backward-compatible
 - Existing `.patch-pipeline.toml` files continue to work (new fields have defaults)
-- `prepare_manifest.json` is optional — Step 2 falls back to `.patch` if no `.prepared.patch` exists
+- `prepared/` subdirectory is optional — Step 2 falls back to the original `.patch` files if no `prepared/` subdirectory exists
 - No database, no new dependencies beyond Python 3.11 stdlib
 
 ---

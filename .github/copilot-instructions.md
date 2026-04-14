@@ -30,9 +30,9 @@ The system has dual implementations: Python scripts and bash alternatives. Both 
 
 ### Key Modules
 
-- **config.py** — Loads settings from `.patch-pipeline.toml` (TOML) and env vars (`PATCH_PIPELINE_*`). Dataclass-based, priority: env > toml > defaults
-- **utils.py** — Git wrapper (git_run), patch parsing (parse_patch_header), validation (validate_format_patch), helpers (slugify, format_table, ensure_clean_worktree)
-- **patch_check.py** — Core equivalence logic: tokenizes diff content, counts +/- per file, compares sender vs receiver using similarity scoring (_token_similarity, _classify)
+- **config.py** — Loads settings from `.patch-pipeline.toml` (TOML) and env vars (`PATCH_PIPELINE_*`). Dataclass-based, priority: env > toml > defaults. The `resolved_working_branch` property resolves: `base_branch` (if set) → `working_branch` (if not "main") → `release/<release>` (if release set) → `"main"`
+- **utils.py** — Git wrapper (`git_run`), patch parsing (`parse_patch_header`), validation (`validate_format_patch`), path-prefix detection (`detect_patch_root_prefix`, `rewrite_patch_with_stripped_prefix`), branch helpers (`ensure_clean_worktree`, `ensure_local_branch`), formatting (`slugify`, `format_table`)
+- **patch_check.py** — Core equivalence logic: tokenizes diff content, counts +/- per file, compares sender vs receiver using similarity scoring (`_token_similarity`, `_classify`)
 
 ## Build, Test & Lint
 
@@ -107,6 +107,12 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 - Flag binary files (`.bin`, `.exe`, `.dll`, `.o`, `.rom`, etc.)
 - Enforce allowed path prefixes if `allowed_path_prefixes` set in config
 - Warnings are informational; don't block staging
+- Use `--force` to overwrite an existing staging session for the same date
+
+### Patch Path-Prefix Stripping
+- `detect_patch_root_prefix(files, repo)` detects when every file in a patch starts with `<repo-name>/` but the actual files live at the stripped path (common when sender's repo root differs from receiver's)
+- `rewrite_patch_with_stripped_prefix(text, prefix)` rewrites `diff --git`, `---`, `+++` headers only — never the commit message body
+- Applied automatically in `patch_apply.py` via `_prepare_patch_for_repo()`; rewrites are done to a temp file, source patch is never mutated
 
 ### Staging Directory Layout
 - Single staging dir (default `.patch-staging/`)
@@ -120,6 +126,8 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 - `test_config.py` — Config loading from env/toml, defaults
 - `test_utils.py` — Patch parsing (headers, files, stats), validation, formatting
 - `test_patch_check.py` — Diff parsing, token similarity scoring, classification
+- `test_branch_flow.py` — `resolved_working_branch` resolution, `ensure_clean_worktree`, `ensure_local_branch` (uses real git repos via `tmp_path`)
+- `test_patch_path_handling.py` — `detect_patch_root_prefix` and `rewrite_patch_with_stripped_prefix` (patches where paths redundantly include the repo root dir name)
 
 ### Common Test Pattern
 ```python
@@ -139,8 +147,7 @@ Patches defined as multi-line strings (e.g., SIMPLE_DIFF, TWO_FILE_DIFF in test_
 1. Create `patch_step_X.py` following existing script structure (argparse, Config.load, step logic, JSON output)
 2. Create parallel `patch_step_X.sh` bash version
 3. Add tests in `tests/test_step_X.py` (fixture patches, expected JSON output)
-4. Update README.md and BASH_README.md with step description
-5. Update pipeline diagram in docs
+4. Update README.md with step description
 
 ### Modifying Config Fields
 1. Add field to `Config` dataclass in config.py (type-hint it)
@@ -157,7 +164,4 @@ Patches defined as multi-line strings (e.g., SIMPLE_DIFF, TWO_FILE_DIFF in test_
 ## Documentation Files
 
 - **README.md / README_CN.md** — User-facing overview and 5-step guide
-- **BASH_README.md / BASH_README_CN.md** — Detailed bash script docs + usage
-- **BASH_QUICKSTART.md / BASH_QUICKSTART_CN.md** — Quick start for bash
-- **BASH_SCRIPTS_INDEX.md** — Navigation guide for bash documentation
-- **BASH_IMPLEMENTATION.md** — Technical comparison of Python vs bash feature parity
+- **BRANCHING_STRATEGY.md / BRANCHING_STRATEGY_CN.md** — Branch naming rationale
