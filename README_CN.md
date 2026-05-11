@@ -97,7 +97,7 @@ python python/patch_test.py
 ### 第五步 — 生成报告并集成
 
 ```bash
-python python/patch_report.py     # 创建 REVIEW_REPORT.md
+python python/patch_report.py     # 创建 REVIEW_REPORT.md 和 REVIEW_REPORT.html
 python python/patch_integrate.py  # 发送方确认 LGTM 后执行
 # 或：bash bash/patch_integrate.sh
 ```

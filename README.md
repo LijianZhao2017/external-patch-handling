@@ -97,7 +97,7 @@ Runs build + unit tests automatically. Prompts for silicon test results (PASS/FA
 ### Step 5 — Generate Report & Integrate
 
 ```bash
-python python/patch_report.py     # creates REVIEW_REPORT.md
+python python/patch_report.py     # creates REVIEW_REPORT.md and REVIEW_REPORT.html
 python python/patch_integrate.py  # after sender says LGTM
 # or: bash bash/patch_integrate.sh
 ```
