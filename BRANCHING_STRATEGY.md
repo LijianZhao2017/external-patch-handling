@@ -28,7 +28,7 @@ traceability, automated application, and conflict resolution.
 
 ## Two-Branch Strategy
 
-The pipeline uses two branches with distinct responsibilities:
+The pipeline uses three branch roles with distinct responsibilities:
 
 ```
                     SENDER
@@ -48,7 +48,22 @@ The pipeline uses two branches with distinct responsibilities:
 │  • Deleted after integration                    │
 └──────────────────────┬──────────────────────────┘
                        │
-              approval + cherry-pick
+              sender blessing
+              cherry-pick commits
+                       │
+                       ▼
+┌─────────────────────────────────────────────────┐
+│         INTEGRATE BRANCH (PR vehicle)           │
+│        integrate/<date>/<patch-slug>             │
+│                                                 │
+│  • Clean branch based on working branch         │
+│  • Cherry-picked commits from review branch     │
+│  • Pushed to origin, opened as GitHub PR        │
+│  • Merged by PR review process                  │
+│  • Deleted after merge                          │
+└──────────────────────┬──────────────────────────┘
+                       │
+              GitHub PR → merge
                        │
                        ▼
 ┌─────────────────────────────────────────────────┐
@@ -56,7 +71,7 @@ The pipeline uses two branches with distinct responsibilities:
 │         main  or  release/<name>                │
 │                                                 │
 │  • Build and release branch                     │
-│  • Only receives blessed commits                │
+│  • Only receives blessed commits via PR         │
 │  • Never polluted by unreviewed patches         │
 │  • Clean history for CI/CD                      │
 └─────────────────────────────────────────────────┘
@@ -73,6 +88,17 @@ The pipeline uses two branches with distinct responsibilities:
   branch is never touched during review
 - After integration, the review branch can be safely deleted
 
+### Integrate Branch — `integrate/<date>/<slug>`
+
+**Purpose:** Clean PR vehicle for merging reviewed commits into the working branch.
+
+- Created from the working branch (same base as the target)
+- Naming mirrors the review branch: `review/...` → `integrate/...`
+- Receives cherry-picked commits from the review branch
+- Pushed to origin and opened as a GitHub PR targeting the working branch
+- Merged via standard PR review process; deleted after merge
+- Branch prefix configurable via `integrate_branch_prefix` (default: `"integrate"`)
+
 ### Working Branch — `main` or `release/<name>`
 
 **Purpose:** Stable branch for builds, testing, and releases.
@@ -83,8 +109,8 @@ The pipeline uses two branches with distinct responsibilities:
   3. ✅ Functional equivalence check (Step 3)
   4. ✅ Build and test pass (Step 4)
   5. ✅ Sender blessing / approval (Step 5)
-- Commits arrive via `git cherry-pick` from the review branch
-- History stays clean — no merge commits from patch review
+- Commits arrive via GitHub PR merge from the integrate branch
+- History stays clean — no direct pushes from patch review
 
 ---
 
@@ -99,11 +125,11 @@ validation          review/<date>/<slug>       vs actual receiver diff
                                                MATCH/PARTIAL/MISMATCH
 
 Step 4: TEST             Step 5: INTEGRATE
-─────────────           ──────────────────
+─────────────           ──────────────────────────────────────────
 Build + unit tests  ──►  Sender approves
-on review branch         cherry-pick each commit
-                         from review → working branch
-                         Delete review branch
+on review branch         cherry-pick commits to integrate/<date>/<slug>
+                         push + open GitHub PR → working branch
+                         delete review branch after PR merge
 ```
 
 ---
@@ -129,20 +155,24 @@ base_branch = "release/bhs_pb2_35d44"    # Working branch (build/release)
 
 ---
 
-## Why Two Branches?
+## Why Three Branches?
 
-| Concern | Review Branch | Working Branch |
-|---------|:------------:|:--------------:|
-| Receives raw patches | ✅ | ❌ |
-| Conflict resolution happens here | ✅ | ❌ |
-| Equivalence checking target | ✅ | ❌ |
-| Builds and releases | ❌ | ✅ |
-| Only blessed commits | ❌ | ✅ |
-| Clean git history | disposable | ✅ |
+| Concern | Review Branch | Integrate Branch | Working Branch |
+|---------|:------------:|:----------------:|:--------------:|
+| Receives raw patches | ✅ | ❌ | ❌ |
+| Conflict resolution happens here | ✅ | ❌ | ❌ |
+| Equivalence checking target | ✅ | ❌ | ❌ |
+| Opened as GitHub PR | ❌ | ✅ | ❌ |
+| Builds and releases | ❌ | ❌ | ✅ |
+| Only blessed commits | ❌ | ✅ | ✅ |
+| Clean git history | disposable | disposable | ✅ |
 
 **Key benefit:** If a patch set has problems — conflicts, mismatches, or test
 failures — the working branch is **completely unaffected**. The review branch
 is simply discarded, and the team can retry with a corrected patch set.
+
+The integrate branch keeps the PR process clean: the working branch only ever
+receives commits through the normal GitHub PR review flow.
 
 ---
 
@@ -157,7 +187,8 @@ Conflicts are handled at two stages:
 - The working branch is untouched
 
 ### During Integration (Step 5)
-- `git cherry-pick` from review → working branch
+- `git cherry-pick` from review → integrate branch
 - If conflicts occur (rare after equivalence check), the pipeline offers
   abort/continue options
-- Only fully clean cherry-picks make it to the working branch
+- Only fully clean cherry-picks make it to the integrate branch, which is
+  then opened as a GitHub PR targeting the working branch

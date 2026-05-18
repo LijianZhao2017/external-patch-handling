@@ -102,6 +102,8 @@ python python/patch_integrate.py  # after sender says LGTM
 # or: bash bash/patch_integrate.sh
 ```
 
+`patch_integrate.py` creates an `integrate/<date>/<slug>` branch from the working branch, cherry-picks the reviewed commits onto it, pushes to origin, and opens a GitHub PR via the `gh` CLI. If `gh` is not installed, it prints the equivalent command.
+
 ---
 
 ## Troubleshooting
@@ -110,6 +112,7 @@ python python/patch_integrate.py  # after sender says LGTM
 |---------|-----|
 | `git am` conflict | Fix files, `git add`, `git am --continue`. Or `git am --abort`. |
 | Cherry-pick conflict | Fix files, `git add`, `git cherry-pick --continue`. Or `--abort`. |
+| `gh pr create` failed | Ensure `gh auth login` is done. Or run the printed fallback command manually. |
 | MISMATCH in check | Review side-by-side output. Confirm with sender if functionally equivalent. |
 | MISSING file | Check `git am` log and re-apply manually if needed. |
 | EXTRA files | Usually fine — receiver adapted context lines. Verify no unintended changes. |

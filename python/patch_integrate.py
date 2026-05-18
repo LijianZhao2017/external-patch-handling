@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-Step 5b: Integrate blessed patches into the working branch
+Step 5: Integrate blessed patches — create PR branch and open GitHub PR
 
 Usage:
     python patch_integrate.py                      # integrate today's patches
     python patch_integrate.py --date 2026-03-25
 
-Cherry-picks commits from the review branch to the working branch.
-Requires sender blessing (interactive confirmation).
+Creates an integrate/<date>/<slug> branch from the working branch, cherry-picks
+commits from the review branch, pushes to origin, and opens a GitHub PR via
+the gh CLI.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,12 +24,44 @@ from config import Config
 from utils import GitError, ensure_clean_worktree, ensure_local_branch, git_run, today_str
 
 
+def _derive_integrate_branch(review_branch: str, cfg: Config) -> str:
+    """Derive integrate/<date>/<slug> from review/<date>/<slug>."""
+    parts = review_branch.split("/", 1)
+    suffix = parts[1] if len(parts) == 2 else review_branch
+    return f"{cfg.integrate_branch_prefix}/{suffix}"
+
+
+def _create_github_pr(
+    repo: Path, integrate_branch: str, base_branch: str, applied: list[dict]
+) -> str | None:
+    """Create a GitHub PR via gh CLI. Returns PR URL or None on failure."""
+    title = f"Integrate: {applied[0]['subject'][:70]}" if applied else "Integrate patches"
+    lines = ["Integrated patches via patch-pipeline:", ""]
+    for c in applied:
+        lines.append(f"- `{c['hash']}` {c['subject']}")
+    body = "\n".join(lines)
+
+    result = subprocess.run(
+        ["gh", "pr", "create",
+         "--base", base_branch,
+         "--head", integrate_branch,
+         "--title", title,
+         "--body", body],
+        capture_output=True,
+        text=True,
+        cwd=repo,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return None
+
+
 def integrate_patches(staging_dir: Path, cfg: Config) -> None:
-    """Cherry-pick review branch commits to working branch."""
+    """Create integrate branch, cherry-pick review commits, push, open GitHub PR."""
     repo = cfg.repo_path
     base_branch = cfg.resolved_working_branch
 
-    # Load apply data to find the review branch
+    # Load apply data to find the review branch and commits
     apply_file = staging_dir / "apply_data.json"
     if not apply_file.exists():
         print(f"❌ No apply data found. Run patch_apply.py first.")
@@ -35,10 +70,10 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
     with open(apply_file) as f:
         apply_data = json.load(f)
 
-    branch = apply_data.get("branch")
+    review_branch = apply_data.get("branch")
     applied = apply_data.get("applied", [])
 
-    if not branch or not applied:
+    if not review_branch or not applied:
         print(f"❌ No commits to integrate. Check apply_data.json.")
         sys.exit(1)
 
@@ -52,9 +87,12 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
             print("Aborted.")
             sys.exit(0)
 
+    # Derive integrate branch name
+    integrate_branch = _derive_integrate_branch(review_branch, cfg)
+
     # Sender blessing gate
     print(f"\n{'─' * 60}")
-    print(f"Integration: {branch} → {base_branch}")
+    print(f"Integration: {review_branch} → {integrate_branch} → PR → {base_branch}")
     print(f"Commits to cherry-pick: {len(applied)}")
     for c in applied:
         print(f"  {c['hash']}  {c['subject'][:60]}")
@@ -76,7 +114,8 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
         print(f"❌ {e}")
         sys.exit(1)
 
-    # Switch to working branch
+    # Checkout base branch, then create integrate branch from it
+    original_branch = git_run("rev-parse", "--abbrev-ref", "HEAD", cwd=repo).stdout.strip()
     print(f"\n🔄 Switching to {base_branch}...")
     try:
         ensure_local_branch(repo, base_branch)
@@ -85,7 +124,16 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
         print(f"❌ {e}")
         sys.exit(1)
 
-    # Cherry-pick each commit
+    result = git_run("checkout", "-b", integrate_branch, cwd=repo, check=False)
+    if result.returncode != 0:
+        if "already exists" in result.stderr:
+            print(f"❌ Branch '{integrate_branch}' already exists.")
+            print(f"   Delete it first:  git branch -D {integrate_branch}")
+        else:
+            print(f"❌ Could not create branch: {result.stderr}")
+        sys.exit(1)
+
+    # Cherry-pick each commit from the review branch
     print(f"🍒 Cherry-picking {len(applied)} commit(s)...\n")
     picked = []
 
@@ -110,25 +158,66 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
                 abort = "y"
             if abort != "n":
                 git_run("cherry-pick", "--abort", cwd=repo, check=False)
-                print("Cherry-pick aborted. Working branch restored.")
+                git_run("checkout", original_branch, cwd=repo, check=False)
+                git_run("branch", "-D", integrate_branch, cwd=repo, check=False)
+                print(f"Cherry-pick aborted and integrate branch cleaned up.")
             break
 
         print("✅")
         picked.append(commit)
 
-    print(f"\n{'─' * 60}")
-    if len(picked) == len(applied):
-        print(f"✅ All {len(picked)} commits cherry-picked to {base_branch}!")
-        print(f"\nNext steps:")
-        print(f"  1. Review: git log --oneline -{len(picked)}")
-        print(f"  2. Push:   git push origin {base_branch}")
-        print(f"  3. Build from {base_branch}")
+    if len(picked) < len(applied):
+        print(f"\n⚠️  Cherry-picked {len(picked)}/{len(applied)} commits (conflict encountered)")
+        sys.exit(1)
+
+    print(f"\n✅ All {len(picked)} commits cherry-picked to {integrate_branch}!")
+
+    # Push integrate branch to origin
+    print(f"\n📤 Pushing {integrate_branch} to origin...")
+    push_result = git_run("push", "origin", integrate_branch, cwd=repo, check=False)
+    if push_result.returncode != 0:
+        print(f"⚠️  Push failed: {push_result.stderr.strip()}")
+        print(f"   Push manually: git push origin {integrate_branch}")
     else:
-        print(f"⚠️  Cherry-picked {len(picked)}/{len(applied)} commits (conflict encountered)")
+        print("✅ Branch pushed.")
+
+    # Open GitHub PR via gh CLI
+    print(f"\n🔗 Creating GitHub PR ({integrate_branch} → {base_branch})...")
+    pr_url = None
+    if not shutil.which("gh"):
+        print("⚠️  gh CLI not found. Create the PR manually:")
+        print(f"   gh pr create --base {base_branch} --head {integrate_branch}")
+    else:
+        pr_url = _create_github_pr(repo, integrate_branch, base_branch, picked)
+        if pr_url:
+            print(f"✅ PR created: {pr_url}")
+        else:
+            print("⚠️  gh pr create failed. Create the PR manually:")
+            print(f"   gh pr create --base {base_branch} --head {integrate_branch}")
+
+    # Save integrate data
+    integrate_data = {
+        "review_branch": review_branch,
+        "integrate_branch": integrate_branch,
+        "base_branch": base_branch,
+        "picked": picked,
+        "pr_url": pr_url,
+    }
+    integrate_file = staging_dir / "integrate_data.json"
+    with open(integrate_file, "w") as f:
+        json.dump(integrate_data, f, indent=2)
+    print(f"\n💾 Integrate data saved to {integrate_file}")
+
+    print(f"\n{'─' * 60}")
+    print(f"✅ Integration complete!")
+    if pr_url:
+        print(f"   PR: {pr_url}")
+    print(f"   Branch: {integrate_branch}")
+    print(f"   Target: {base_branch}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Integrate blessed patches to working branch")
+    parser = argparse.ArgumentParser(description="Integrate blessed patches via PR branch")
     parser.add_argument("--date", default=today_str(), help="Staging date (default: today)")
     parser.add_argument("--repo", help="Path to git repo (default: cwd)")
     args = parser.parse_args()

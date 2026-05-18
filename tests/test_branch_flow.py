@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "pyt
 import pytest
 
 from config import Config
+from patch_integrate import _derive_integrate_branch
 from utils import GitError, ensure_clean_worktree, ensure_local_branch
 
 
@@ -86,3 +87,44 @@ def test_ensure_local_branch_creates_tracking_branch(tmp_path):
     assert branch == head
     upstream = _git(tmp_path, "rev-parse", "--symbolic-full-name", "release/bhs_pb2_35d44@{upstream}").stdout.strip()
     assert upstream == "refs/remotes/origin/release/bhs_pb2_35d44"
+
+
+# ============================================================================
+# Tests for integrate branch derivation
+# ============================================================================
+
+def test_derive_integrate_branch_standard(tmp_path):
+    cfg = Config.load(repo_path=tmp_path)
+    result = _derive_integrate_branch("review/2026-03-26/fix-timing", cfg)
+    assert result == "integrate/2026-03-26/fix-timing"
+
+
+def test_derive_integrate_branch_complex_slug(tmp_path):
+    cfg = Config.load(repo_path=tmp_path)
+    result = _derive_integrate_branch("review/2026-05-18/add-doe9-32gb-support", cfg)
+    assert result == "integrate/2026-05-18/add-doe9-32gb-support"
+
+
+def test_derive_integrate_branch_custom_prefix(tmp_path):
+    (tmp_path / ".patch-pipeline.toml").write_text('integrate_branch_prefix = "pr"\n')
+    cfg = Config.load(repo_path=tmp_path)
+    result = _derive_integrate_branch("review/2026-03-26/fix-timing", cfg)
+    assert result == "pr/2026-03-26/fix-timing"
+
+
+def test_derive_integrate_branch_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATCH_PIPELINE_INTEGRATE_BRANCH_PREFIX", "merge-request")
+    cfg = Config.load(repo_path=tmp_path)
+    result = _derive_integrate_branch("review/2026-03-26/fix-timing", cfg)
+    assert result == "merge-request/2026-03-26/fix-timing"
+
+
+def test_integrate_branch_prefix_default(tmp_path):
+    cfg = Config.load(repo_path=tmp_path)
+    assert cfg.integrate_branch_prefix == "integrate"
+
+
+def test_integrate_branch_prefix_from_toml(tmp_path):
+    (tmp_path / ".patch-pipeline.toml").write_text('integrate_branch_prefix = "pr"\n')
+    cfg = Config.load(repo_path=tmp_path)
+    assert cfg.integrate_branch_prefix == "pr"

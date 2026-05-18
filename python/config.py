@@ -31,6 +31,7 @@ class Config:
     working_branch: str = "main"
     base_branch: str = ""
     review_branch_prefix: str = "review"
+    integrate_branch_prefix: str = "integrate"
 
     # Shared folder convention: <release>/<date>/
     release: str = "release-name"
