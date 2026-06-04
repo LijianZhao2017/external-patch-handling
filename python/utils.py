@@ -69,45 +69,95 @@ def ensure_clean_worktree(repo: Path, ignored_paths: list[str] | None = None) ->
 
 
 def ensure_local_branch(repo: Path, branch: str, remote: str = "origin") -> bool:
-    """Create a local tracking branch if only the remote branch exists."""
+    """Create a local tracking branch if only the remote branch exists.
+
+    Also handles tags — if ``branch`` names a tag, returns False so the caller
+    can proceed directly to ``git checkout <tag>`` (detached HEAD is fine for
+    creating a new review branch on top of it).
+    """
     local_ref = f"refs/heads/{branch}"
     remote_ref = f"refs/remotes/{remote}/{branch}"
+    tag_ref = f"refs/tags/{branch}"
 
     if git_run("rev-parse", "--verify", local_ref, cwd=repo, check=False).returncode == 0:
         return False
 
-    if git_run("rev-parse", "--verify", remote_ref, cwd=repo, check=False).returncode != 0:
-        raise GitError(
-            f"Base branch '{branch}' not found locally or as {remote}/{branch}."
-        )
+    if git_run("rev-parse", "--verify", remote_ref, cwd=repo, check=False).returncode == 0:
+        git_run("branch", "--track", branch, f"{remote}/{branch}", cwd=repo)
+        return True
 
-    git_run("branch", "--track", branch, f"{remote}/{branch}", cwd=repo)
-    return True
+    if git_run("rev-parse", "--verify", tag_ref, cwd=repo, check=False).returncode == 0:
+        return False  # it's a tag; git checkout <tag> will work fine
+
+    raise GitError(
+        f"Base branch '{branch}' not found locally, as {remote}/{branch}, or as a tag."
+    )
 
 
 def detect_patch_root_prefix(files: list[str], repo: Path) -> str | None:
     """Detect when patch paths redundantly include the repo root name.
 
-    Returns the prefix string if *every* file starts with ``<repo-name>/``
-    and the stripped path exists on disk.  Returns ``None`` if any file
-    doesn't match — partial prefix detection would be unreliable.
+    Handles both single-level (``MemoryFirmware/foo.c``) and multi-level
+    prefixes (``OakStream/.../MemoryFirmware/foo.c``) — any path where the
+    repo directory name appears as a component followed by the actual file path.
 
-    Example:
+    Returns the common prefix string (without trailing slash) when:
+      - Every file shares the same prefix that ends with ``/<repo-name>``
+        (or ``<repo-name>`` at path start)
+      - At least one stripped path exists in the repo (confirming the mapping)
+      - No file's full (unstripped) path exists in the repo
+
+    Returns ``None`` if the criteria are not met — partial prefix detection
+    would be unreliable.
+
+    Examples:
       repo path: /work/Intel
-      patch file: Intel/ServerSiliconPkg/foo.c
-      actual file: ServerSiliconPkg/foo.c
+      patch file: Intel/ServerSiliconPkg/foo.c   → prefix "Intel"
+
+      repo path: ~/OKS/MemoryFirmware
+      patch file: OakStream/sub/MemoryFirmware/ServerMemoryPkg/foo.c
+                                                → prefix "OakStream/sub/MemoryFirmware"
     """
     if not files:
         return None
 
-    prefix = repo.name
+    repo_name = repo.name
+
+    def _extract_prefix(file_path: str) -> str | None:
+        # Case 1: path starts directly with repo_name/
+        if file_path.startswith(repo_name + "/"):
+            return repo_name
+        # Case 2: repo_name appears as a component later in the path
+        marker = "/" + repo_name + "/"
+        idx = file_path.find(marker)
+        if idx != -1:
+            return file_path[: idx + 1 + len(repo_name)]
+        return None
+
+    common_prefix: str | None = None
     for file_path in files:
-        if not file_path.startswith(prefix + "/"):
+        p = _extract_prefix(file_path)
+        if p is None:
             return None
-        stripped = file_path[len(prefix) + 1:]
-        if (repo / file_path).exists() or not (repo / stripped).exists():
+        if common_prefix is None:
+            common_prefix = p
+        elif common_prefix != p:
+            return None  # inconsistent prefixes across files
+
+    if common_prefix is None:
+        return None
+
+    # Confirm: at least one file's stripped path exists, none of the full paths do
+    confirmed = False
+    for file_path in files:
+        if (repo / file_path).exists():
+            # Full path exists → no stripping needed
             return None
-    return prefix
+        stripped = file_path[len(common_prefix) + 1:]
+        if (repo / stripped).exists():
+            confirmed = True
+
+    return common_prefix if confirmed else None
 
 
 def rewrite_patch_with_stripped_prefix(text: str, prefix: str) -> str:
