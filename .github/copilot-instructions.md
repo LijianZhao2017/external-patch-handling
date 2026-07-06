@@ -76,8 +76,15 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 
 ### Branch Naming
 - Review branches: `review/<YYYY-MM-DD>/<slug>` (e.g., `review/2026-03-26/fix-timing`)
+- Integrate branches: `integrate/<YYYY-MM-DD>/<slug>` — created fresh from the working branch by `patch_integrate.py`/`.sh`, never reuses the review branch
 - Slug derived from patch subject via `slugify()` (alphanumeric + hyphens, max 50 chars)
 - Always checkout working branch before applying (default: `main`)
+
+### Integration Flow (Step 5)
+- `patch_integrate.py` (`_derive_integrate_branch`, `integrate_patches`): checks out the working branch, creates `integrate/<date>/<slug>` (prefix configurable via `integrate_branch_prefix` / `PATCH_PIPELINE_INTEGRATE_BRANCH_PREFIX`), cherry-picks the reviewed commits from the review branch, pushes to origin, and opens a PR with `gh pr create` (`_create_github_pr`) — prints the equivalent command if `gh` is missing
+- The working branch never receives commits directly; only via PR merge
+- **Asymmetry**: Python has separate `patch_report.py` (Markdown + HTML) and `patch_integrate.py`. The bash version has no `patch_report.sh` — `bash/patch_integrate.sh` generates and prints the report path inline before integrating
+- Design rationale: `docs/superpowers/specs/2026-05-18-pr-branch-integration-design.md`
 
 ### JSON Output Compatibility
 - All scripts (Python and bash) write to `.patch-staging/<date>/*.json`
@@ -126,8 +133,9 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 - `test_config.py` — Config loading from env/toml, defaults
 - `test_utils.py` — Patch parsing (headers, files, stats), validation, formatting
 - `test_patch_check.py` — Diff parsing, token similarity scoring, classification
-- `test_branch_flow.py` — `resolved_working_branch` resolution, `ensure_clean_worktree`, `ensure_local_branch` (uses real git repos via `tmp_path`)
+- `test_branch_flow.py` — `resolved_working_branch` resolution, `ensure_clean_worktree`, `ensure_local_branch`, `_derive_integrate_branch` (uses real git repos via `tmp_path`)
 - `test_patch_path_handling.py` — `detect_patch_root_prefix` and `rewrite_patch_with_stripped_prefix` (patches where paths redundantly include the repo root dir name)
+- `test_patch_report.py` — Markdown/HTML report generation from staged JSON data
 
 ### Common Test Pattern
 ```python
@@ -165,3 +173,5 @@ Patches defined as multi-line strings (e.g., SIMPLE_DIFF, TWO_FILE_DIFF in test_
 
 - **README.md / README_CN.md** — User-facing overview and 5-step guide
 - **BRANCHING_STRATEGY.md / BRANCHING_STRATEGY_CN.md** — Branch naming rationale
+- **docs/superpowers/specs/** — Design docs for major changes (PR-branch integration, real-world hardening); check here for rationale before altering integrate/branch logic
+- **skills/public/bios-patch-pipeline/SKILL.md** — A separate, manual/ad-hoc patch-review workflow (not the `python/`/`bash/` pipeline) for messy real-world vendor patches: CRLF normalization, vendor marker detection (e.g. `//CXSH+`), archive intake. None of this logic exists in `python/`/`bash/` yet — it's a documented-but-unimplemented hardening design (see `docs/superpowers/specs/2026-04-14-real-world-hardening-design.md`, not marked Implemented)
