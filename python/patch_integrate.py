@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,38 @@ def _derive_integrate_branch(review_branch: str, cfg: Config) -> str:
     parts = review_branch.split("/", 1)
     suffix = parts[1] if len(parts) == 2 else review_branch
     return f"{cfg.integrate_branch_prefix}/{suffix}"
+
+
+_LGTM_CHECKED_RE = re.compile(r"-\s*\[x\].*\*\*LGTM\*\*", re.IGNORECASE)
+
+
+def _print_report_hint(staging_dir: Path) -> None:
+    """Print an informational hint about the review report and LGTM status.
+
+    Mirrors bash/patch_integrate.sh's Approval Check section. This never
+    blocks the flow — the actual approval gate is the yes/no prompt that
+    follows in integrate_patches(). Any failure to read the report (bad
+    encoding, permissions, or a race where the file disappears) degrades to
+    the "not marked" warning instead of raising.
+    """
+    html_report = staging_dir / "REVIEW_REPORT.html"
+    md_report = staging_dir / "REVIEW_REPORT.md"
+
+    if html_report.exists():
+        print(f"ℹ️  Review report (open this for review): {html_report}")
+
+    if md_report.exists():
+        print(f"ℹ️  Review report source (edit this to mark LGTM): {md_report}")
+        try:
+            text = md_report.read_text(errors="replace")
+        except OSError:
+            text = ""
+        if _LGTM_CHECKED_RE.search(text):
+            print("✅ Report shows LGTM approval (checkbox marked)")
+        else:
+            print("⚠️  Report exists but LGTM checkbox not marked")
+    else:
+        print(f"⚠️  No review report found at {md_report}")
 
 
 def _create_github_pr(
@@ -97,6 +130,8 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
     for c in applied:
         print(f"  {c['hash']}  {c['subject'][:60]}")
     print(f"{'─' * 60}\n")
+
+    _print_report_hint(staging_dir)
 
     try:
         blessed = input("Has the sender blessed these changes? (yes/no): ").strip().lower()

@@ -83,7 +83,7 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 ### Integration Flow (Step 5)
 - `patch_integrate.py` (`_derive_integrate_branch`, `integrate_patches`): checks out the working branch, creates `integrate/<date>/<slug>` (prefix configurable via `integrate_branch_prefix` / `PATCH_PIPELINE_INTEGRATE_BRANCH_PREFIX`), cherry-picks the reviewed commits from the review branch, pushes to origin, and opens a PR with `gh pr create` (`_create_github_pr`) — prints the equivalent command if `gh` is missing
 - The working branch never receives commits directly; only via PR merge
-- **Asymmetry**: Python has separate `patch_report.py` (Markdown + HTML) and `patch_integrate.py`. The bash version has no `patch_report.sh` — `bash/patch_integrate.sh` generates and prints the report path inline before integrating
+- **Asymmetry**: Python has separate `patch_report.py` (Markdown + HTML) and `patch_integrate.py`. There is no `bash/patch_report.sh` — bash never generates a report at all. `bash/patch_integrate.sh` only checks whether `REVIEW_REPORT.md`/`.html` already exist (from a prior Python `patch_report.py` run) and prints an informational LGTM-checkbox hint before the approval prompt; it does not generate them. This is a known, undocumented-until-now gap (see `docs/superpowers/specs/2026-07-06-dmr-target-and-html-primary-report-design.md`), not something this change fixes
 - Design rationale: `docs/superpowers/specs/2026-05-18-pr-branch-integration-design.md`
 
 ### JSON Output Compatibility
