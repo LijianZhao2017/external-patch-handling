@@ -696,8 +696,8 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(report)
     html_out_path.write_text(html_report)
-    print(f"📄 Markdown report saved to {out_path}")
-    print(f"🌐 HTML report saved to {html_out_path}")
+    print(f"🌐 HTML report saved to {html_out_path} (open this for review)")
+    print(f"📄 Markdown report saved to {out_path} (edit the LGTM checkbox here to approve)")
     print(f"\n{report}")
 
 

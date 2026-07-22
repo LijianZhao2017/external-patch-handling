@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,18 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
     for c in applied:
         print(f"  {c['hash']}  {c['subject'][:60]}")
     print(f"{'─' * 60}\n")
+
+    # Informational LGTM hint — does not gate integration; the input() prompt below is the real gate.
+    report_file = staging_dir / "REVIEW_REPORT.md"
+    if report_file.exists():
+        report_text = report_file.read_text(errors="ignore")
+        if re.search(r"- \[x\].*\*\*LGTM\*\*", report_text, re.IGNORECASE):
+            print(f"ℹ️  Review report shows LGTM approval: {report_file}")
+        else:
+            print(f"⚠️  Review report exists but LGTM status not explicitly marked: {report_file}")
+    else:
+        print(f"⚠️  No review report found at {report_file}")
+    print()
 
     try:
         blessed = input("Has the sender blessed these changes? (yes/no): ").strip().lower()

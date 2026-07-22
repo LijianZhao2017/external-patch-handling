@@ -83,8 +83,7 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 ### Integration Flow (Step 5)
 - `patch_integrate.py` (`_derive_integrate_branch`, `integrate_patches`): checks out the working branch, creates `integrate/<date>/<slug>` (prefix configurable via `integrate_branch_prefix` / `PATCH_PIPELINE_INTEGRATE_BRANCH_PREFIX`), cherry-picks the reviewed commits from the review branch, pushes to origin, and opens a PR with `gh pr create` (`_create_github_pr`) — prints the equivalent command if `gh` is missing
 - The working branch never receives commits directly; only via PR merge
-- **Asymmetry**: Python has separate `patch_report.py` (Markdown + HTML) and `patch_integrate.py`. The bash version has no `patch_report.sh` — `bash/patch_integrate.sh` generates and prints the report path inline before integrating
-- Design rationale: `docs/superpowers/specs/2026-05-18-pr-branch-integration-design.md`
+- **Asymmetry**: Python has separate `patch_report.py` (Markdown + HTML) and `patch_integrate.py`. There is no `bash/patch_report.sh` — bash never generates a report; `bash/patch_integrate.sh` only checks whether `REVIEW_REPORT.md`/`.html` already exist (from a prior Python `patch_report.py` run) and prints an informational LGTM-checkbox hint before the approval prompt. `patch_integrate.py` prints the same informational hint for parity. Neither hint gates integration — the `input()` yes/no prompt is the real gate
 
 ### JSON Output Compatibility
 - All scripts (Python and bash) write to `.patch-staging/<date>/*.json`
@@ -173,5 +172,4 @@ Patches defined as multi-line strings (e.g., SIMPLE_DIFF, TWO_FILE_DIFF in test_
 
 - **README.md / README_CN.md** — User-facing overview and 5-step guide
 - **BRANCHING_STRATEGY.md / BRANCHING_STRATEGY_CN.md** — Branch naming rationale
-- **docs/superpowers/specs/** — Design docs for major changes (PR-branch integration, real-world hardening); check here for rationale before altering integrate/branch logic
-- **skills/public/bios-patch-pipeline/SKILL.md** — A separate, manual/ad-hoc patch-review workflow (not the `python/`/`bash/` pipeline) for messy real-world vendor patches: CRLF normalization, vendor marker detection (e.g. `//CXSH+`), archive intake. None of this logic exists in `python/`/`bash/` yet — it's a documented-but-unimplemented hardening design (see `docs/superpowers/specs/2026-04-14-real-world-hardening-design.md`, not marked Implemented)
+- **skills/public/bios-patch-pipeline/SKILL.md** — A separate, manual/ad-hoc patch-review workflow (not the `python/`/`bash/` pipeline) for messy real-world vendor patches: CRLF normalization, vendor marker detection (e.g. `//CXSH+`), archive intake. None of this logic exists in `python/`/`bash/` yet — it remains a documented-but-unimplemented hardening design

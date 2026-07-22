@@ -96,6 +96,7 @@ if [[ ! -f "$TEST_DATA_FILE" ]]; then
 fi
 
 REPORT_FILE="$STAGING_DIR/REVIEW_REPORT.md"
+REPORT_FILE_HTML="$STAGING_DIR/REVIEW_REPORT.html"
 
 log_info "Integrating patches from $DATE"
 
@@ -130,10 +131,14 @@ echo "📋 Integration Approval Check"
 echo "────────────────────────────────────────────────────────────"
 echo ""
 
+if [[ -f "$REPORT_FILE_HTML" ]]; then
+  log_info "HTML report (open this for review): $REPORT_FILE_HTML"
+fi
+
 if [[ -f "$REPORT_FILE" ]]; then
   log_info "Review report available at: $REPORT_FILE"
   echo ""
-  if grep -q "LGTM.*✅" "$REPORT_FILE" 2>/dev/null; then
+  if grep -qi -- '- \[x\].*\*\*LGTM\*\*' "$REPORT_FILE" 2>/dev/null; then
     log_success "Report shows LGTM approval"
   else
     log_warn "Report exists but LGTM status not explicitly marked"
