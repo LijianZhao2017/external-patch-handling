@@ -8,6 +8,7 @@
 # Environment variables (override defaults):
 #     PATCH_PIPELINE_BUILD_COMMAND (e.g., "make -j$(nproc)")
 #     PATCH_PIPELINE_UNIT_TEST_COMMAND (e.g., "pytest tests/")
+#     PATCH_PIPELINE_TEST_TIMEOUT_SECONDS (default: 600)
 
 set -euo pipefail
 
@@ -21,6 +22,11 @@ DATE="${DATE:-$(date +%Y-%m-%d)}"
 STAGING_PATH="${STAGING_PATH:-.patch-staging}"
 BUILD_CMD="${PATCH_PIPELINE_BUILD_COMMAND:-make -j$(nproc)}"
 TEST_CMD="${PATCH_PIPELINE_UNIT_TEST_COMMAND:-pytest tests/}"
+SILICON_RESULT="${PATCH_PIPELINE_SILICON_RESULT:-}"
+SILICON_NOTES="${PATCH_PIPELINE_SILICON_NOTES:-}"
+SILICON_ATTACHMENT="${PATCH_PIPELINE_SILICON_ATTACHMENT:-}"
+TEST_TIMEOUT_SECONDS="${PATCH_PIPELINE_TEST_TIMEOUT_SECONDS:-600}"
+PROMPT_ENABLED=true
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -40,6 +46,26 @@ while [[ $# -gt 0 ]]; do
     --test-cmd)
       TEST_CMD="$2"
       shift 2
+      ;;
+    --silicon-result)
+      SILICON_RESULT="$2"
+      shift 2
+      ;;
+    --silicon-notes)
+      SILICON_NOTES="$2"
+      shift 2
+      ;;
+    --silicon-attachment)
+      SILICON_ATTACHMENT="$2"
+      shift 2
+      ;;
+    --timeout)
+      TEST_TIMEOUT_SECONDS="$2"
+      shift 2
+      ;;
+    --no-prompt)
+      PROMPT_ENABLED=false
+      shift
       ;;
     --help)
       sed -n '2,/^$/p' "$0" | sed 's/^# //'
@@ -77,9 +103,29 @@ git_run() {
   git --no-pager -C "$REPO_PATH" "$@"
 }
 
+run_command_with_timeout() {
+  local command="$1"
+  local timeout_seconds="$2"
+  python3 - "$command" "$timeout_seconds" <<'PYTIMEOUT'
+import subprocess
+import sys
+
+command, timeout_seconds = sys.argv[1], int(sys.argv[2])
+try:
+    subprocess.run(command, shell=True, executable="/bin/bash", check=True, timeout=timeout_seconds)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+except subprocess.CalledProcessError as exc:
+    raise SystemExit(exc.returncode)
+PYTIMEOUT
+}
+
 # ============================================================================
 # Validation
 # ============================================================================
+if [[ ! "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  die "Invalid staging date '$DATE'; expected YYYY-MM-DD"
+fi
 
 STAGING_DIR="$REPO_PATH/$STAGING_PATH/$DATE"
 if [[ ! -d "$STAGING_DIR" ]]; then
@@ -104,11 +150,19 @@ echo "────────────────────────�
 
 BUILD_LOG=$(mktemp)
 BUILD_PASS=true
-if cd "$REPO_PATH" && bash -c "$BUILD_CMD" > "$BUILD_LOG" 2>&1; then
+BUILD_RESULT="PASS"
+if cd "$REPO_PATH" && run_command_with_timeout "$BUILD_CMD" "$TEST_TIMEOUT_SECONDS" > "$BUILD_LOG" 2>&1; then
   log_success "Build passed"
 else
-  log_warn "Build failed (see $BUILD_LOG)"
+  status=$?
   BUILD_PASS=false
+  if [[ "$status" -eq 124 ]]; then
+    BUILD_RESULT="TIMEOUT"
+    log_warn "Build timed out after ${TEST_TIMEOUT_SECONDS}s (see $BUILD_LOG)"
+  else
+    BUILD_RESULT="FAIL"
+    log_warn "Build failed (see $BUILD_LOG)"
+  fi
 fi
 
 # ============================================================================
@@ -122,11 +176,19 @@ echo "────────────────────────�
 
 TEST_LOG=$(mktemp)
 TEST_PASS=true
-if cd "$REPO_PATH" && bash -c "$TEST_CMD" > "$TEST_LOG" 2>&1; then
+TEST_RESULT="PASS"
+if cd "$REPO_PATH" && run_command_with_timeout "$TEST_CMD" "$TEST_TIMEOUT_SECONDS" > "$TEST_LOG" 2>&1; then
   log_success "Unit tests passed"
 else
-  log_warn "Unit tests failed (see $TEST_LOG)"
+  status=$?
   TEST_PASS=false
+  if [[ "$status" -eq 124 ]]; then
+    TEST_RESULT="TIMEOUT"
+    log_warn "Unit tests timed out after ${TEST_TIMEOUT_SECONDS}s (see $TEST_LOG)"
+  else
+    TEST_RESULT="FAIL"
+    log_warn "Unit tests failed (see $TEST_LOG)"
+  fi
 fi
 
 # ============================================================================
@@ -144,20 +206,23 @@ echo "  FAIL    - Hardware tests failed"
 echo "  PENDING - Testing in progress or not applicable"
 echo ""
 
-SILICON_RESULT="PENDING"
-read -p "Enter silicon test result [PENDING]: " -r input
-if [[ -n "$input" ]]; then
-  INPUT=$(echo "$input" | tr '[:lower:]' '[:upper:]')
-  case "$INPUT" in
-    PASS|FAIL|PENDING)
-      SILICON_RESULT="$INPUT"
-      ;;
-    *)
-      log_warn "Invalid result '$INPUT' (expected PASS/FAIL/PENDING), using PENDING"
-      SILICON_RESULT="PENDING"
-      ;;
-  esac
+if [[ -z "$SILICON_RESULT" && "$PROMPT_ENABLED" == "true" && -t 0 ]]; then
+  read -r -p "Enter silicon test result [PENDING]: " input
+  if [[ -n "$input" ]]; then
+    SILICON_RESULT=$(echo "$input" | tr '[:lower:]' '[:upper:]')
+  fi
 fi
+SILICON_RESULT="${SILICON_RESULT:-PENDING}"
+if [[ "$SILICON_RESULT" == "SKIP" ]]; then
+  SILICON_RESULT="SKIPPED"
+fi
+case "$SILICON_RESULT" in
+  PASS|FAIL|PENDING|SKIPPED) ;;
+  *)
+    log_warn "Invalid result '$SILICON_RESULT' (expected PASS/FAIL/PENDING/SKIPPED), using PENDING"
+    SILICON_RESULT="PENDING"
+    ;;
+esac
 
 # ============================================================================
 # Summary
@@ -168,8 +233,8 @@ echo "────────────────────────�
 echo "📊 Test Summary"
 echo "────────────────────────────────────────────────────────────"
 echo ""
-echo "Build test      : $([ "$BUILD_PASS" = "true" ] && echo "✅ PASS" || echo "❌ FAIL")"
-echo "Unit tests      : $([ "$TEST_PASS" = "true" ] && echo "✅ PASS" || echo "❌ FAIL")"
+echo "Build test      : $BUILD_RESULT"
+echo "Unit tests      : $TEST_RESULT"
 echo "Silicon tests   : $SILICON_RESULT"
 echo ""
 
@@ -187,19 +252,35 @@ fi
 # Save test data for report
 # ============================================================================
 
-TEST_DATA=$(cat <<EOF
-{
-  "date": "$DATE",
-  "build_cmd": "$BUILD_CMD",
-  "build_pass": $([[ "$BUILD_PASS" == "true" ]] && echo "true" || echo "false"),
-  "test_cmd": "$TEST_CMD",
-  "test_pass": $([[ "$TEST_PASS" == "true" ]] && echo "true" || echo "false"),
-  "silicon_result": "$SILICON_RESULT",
-  "build_log": "$BUILD_LOG",
-  "test_log": "$TEST_LOG"
-}
-EOF
-)
+python3 - "$STAGING_DIR" "$BUILD_CMD" "$TEST_CMD" "$BUILD_RESULT" "$TEST_RESULT" "$SILICON_RESULT" "$SILICON_NOTES" "$SILICON_ATTACHMENT" "$BUILD_LOG" "$TEST_LOG" <<'PYJSON'
+import json
+import sys
+from pathlib import Path
 
-echo "$TEST_DATA" | tee "$STAGING_DIR/test_data.json" > /dev/null
+staging = Path(sys.argv[1])
+build_cmd, test_cmd = sys.argv[2], sys.argv[3]
+build_result, test_result = sys.argv[4], sys.argv[5]
+silicon_result, silicon_notes, silicon_attachment = sys.argv[6:9]
+build_log, test_log = sys.argv[9:11]
+results = [
+    {
+        "test": "Build Check",
+        "result": build_result,
+        "notes": f"Command: {build_cmd}; log: {build_log}",
+    },
+    {
+        "test": "Unit Test",
+        "result": test_result,
+        "notes": f"Command: {test_cmd}; log: {test_log}",
+    },
+    {
+        "test": "Silicon Test",
+        "result": silicon_result,
+        "notes": silicon_notes,
+    },
+]
+if silicon_attachment:
+    results[-1]["attachment"] = silicon_attachment
+(staging / "test_data.json").write_text(json.dumps(results, indent=2) + "\n")
+PYJSON
 log_info "Test data saved to $STAGING_DIR/test_data.json"

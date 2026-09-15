@@ -27,6 +27,7 @@ from utils import (
     parse_patch_header,
     today_str,
     validate_format_patch,
+    validate_staging_date,
 )
 
 BINARY_EXTS = {".bin", ".exe", ".dll", ".o", ".obj", ".rom", ".fd", ".cap"}
@@ -44,7 +45,14 @@ def _static_checks(info: dict, cfg: Config) -> list[str]:
     return warnings
 
 
-def receive_patches(source_dir: Path, cfg: Config, date: str | None = None, force: bool = False) -> list[dict]:
+def receive_patches(
+    source_dir: Path,
+    cfg: Config,
+    date: str | None = None,
+    force: bool = False,
+    prompt_notes: bool = True,
+    review_note: str = "",
+) -> list[dict]:
     """Validate, review, and stage patches from source_dir."""
     patches = list_patches(source_dir)
     if not patches:
@@ -53,13 +61,21 @@ def receive_patches(source_dir: Path, cfg: Config, date: str | None = None, forc
 
     print(f"Found {len(patches)} patch file(s) in {source_dir}\n")
 
-    staging = cfg.staging_path / (date or today_str())
+    session_date = date or today_str()
+    try:
+        validate_staging_date(session_date)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
+    staging = cfg.staging_path / session_date
 
-    # Guard: don't silently overwrite an existing session
+    # Guard: do not silently overwrite a session or leave stale patches.
     if staging.exists() and list_patches(staging) and not force:
         print(f"❌ Staging dir already has patches for {staging.name}.")
-        print(f"   Use --force to overwrite, or --date <other-date> to use a different slot.")
+        print(f"   Use --force to replace the complete session, or --date <other-date> to use a different slot.")
         sys.exit(1)
+    if force and staging.exists():
+        shutil.rmtree(staging)
 
     staging.mkdir(parents=True, exist_ok=True)
 
@@ -96,10 +112,12 @@ def receive_patches(source_dir: Path, cfg: Config, date: str | None = None, forc
                 print(f"  ⚠️  {w}")
             all_warnings.extend(warnings)
 
-        try:
-            note = input("  📝 Note (Enter to skip): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            note = ""
+        note = review_note
+        if not note and prompt_notes and sys.stdin.isatty():
+            try:
+                note = input("  📝 Note (Enter to skip): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                note = ""
         if note:
             reviewer_notes[p.name] = note
 
@@ -132,7 +150,9 @@ def main():
     parser.add_argument("source", help="Directory containing .patch files")
     parser.add_argument("--repo", help="Path to git repo (default: cwd)")
     parser.add_argument("--date", default=None, help="Override staging date (default: today)")
-    parser.add_argument("--force", action="store_true", help="Overwrite existing staged session")
+    parser.add_argument("--force", action="store_true", help="Replace the complete existing staged session")
+    parser.add_argument("--no-prompt", action="store_true", help="Do not prompt for reviewer notes")
+    parser.add_argument("--note", default="", help="Apply one reviewer note to each valid patch without prompting")
     args = parser.parse_args()
 
     cfg = Config.load(args.repo)
@@ -142,7 +162,14 @@ def main():
         print(f"❌ Source directory does not exist: {source}")
         sys.exit(1)
 
-    receive_patches(source, cfg, date=args.date, force=args.force)
+    receive_patches(
+        source,
+        cfg,
+        date=args.date,
+        force=args.force,
+        prompt_notes=not args.no_prompt,
+        review_note=args.note,
+    )
 
 
 if __name__ == "__main__":

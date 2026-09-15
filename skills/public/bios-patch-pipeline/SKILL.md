@@ -1,12 +1,12 @@
 ---
 name: bios-patch-pipeline
 description: Use this skill whenever the user wants to receive, validate, review, apply, or triage external BIOS or firmware patch bundles against a git repo. Trigger on requests involving `.patch` series, `git format-patch`, `.7z` or `.zip` archives, review branches, release branches such as `release/bhs_pb2_35d44`, `git am` conflicts, Intel BIOS trees like `~/OKS/Intel`, or when the user asks for a patch review report even if they do not explicitly mention a pipeline. Also trigger when the user mentions CRLF patch failures, vendor markers like `//CXSH+`, patch line-ending issues, or cross-platform patch application problems.
-compatibility: Requires bash, git, and filesystem access. Works best when the target repo is local and the patch input is a directory of `.patch` files or an extractable archive.
+compatibility: Requires bash, Python 3.10+, git, and filesystem access. Works best when the target repo is local and the patch input is a directory of `.patch` files or an extractable archive.
 ---
 
 # BIOS Patch Pipeline
 
-Use this skill to run a safe, manual patch review workflow without depending on the repository's Python or bash pipeline scripts.
+Use this skill as the human-facing orchestration layer for the repository's patch-pipeline scripts. Let the scripts perform deterministic intake, apply, equivalence, test, report, and integration work; keep human interaction limited to resolving genuine conflicts and providing scoped sender approval.
 
 The goal is to help the user answer five questions reliably:
 
@@ -25,6 +25,7 @@ Establish these inputs before acting:
 - Intended release or base branch
 - Optional staging label/date for the review run
 - Optional design document references (PDF/doc paths for review checklist)
+- Approval source: sender email metadata exported as scoped approval JSON
 
 If the user gives a release name like `bhs_pb2_35d44` but not a branch, derive the base branch as `release/<release>`.
 
@@ -38,7 +39,25 @@ If the user gives neither a base branch nor a release, inspect the repo and ask 
 - Keep the target repo recoverable. If `git am` starts and fails, abort cleanly before retrying with a different strategy.
 - Leave the repo on a stable branch at the end whenever feasible.
 - Do not silently rewrite source patches or integrate changes without telling the user.
+- Treat generated staging JSON as the machine-readable handoff between skill and scripts; do not infer success from console text.
 - When editing files that have CRLF line endings, always use binary-safe reads/writes (`read_bytes()`/`write_bytes()`) to avoid Python's universal newline mode silently converting CRLF→LF across entire files.
+
+## Script orchestration
+
+When the target repository contains this pipeline, prefer these commands over reimplementing the logic in the skill:
+
+```bash
+python python/patch_receive.py <prepared-patch-dir> --repo <repo> --date <date> --no-prompt
+python python/patch_apply.py --repo <repo> --date <date>
+python python/patch_check.py --repo <repo> --date <date>
+python python/patch_test.py --repo <repo> --date <date> --no-prompt --silicon-result PENDING
+python python/patch_report.py --repo <repo> --date <date>
+python python/patch_integrate.py --repo <repo> --date <date> --approval-file <approval-json>
+```
+
+The Bash commands are valid alternatives for the same steps. They use Python for structured staging metadata so both implementations remain interoperable. The skill still owns archive extraction, read-only source handling, CRLF normalization, vendor-marker inspection, and collection of approval email metadata before invoking the scripts.
+
+Integration is fail-closed. The approval JSON must contain `decision: APPROVED`, `approval_type: email`, the message ID, sender, approval timestamp, exact review branch, the full ordered review-branch commit SHA list, and the SHA-256 of the reviewed report. A bare `LGTM`, a local checkbox, or a yes/no prompt is not sufficient.
 
 ## Workflow
 
@@ -178,9 +197,9 @@ After successful apply, check for issues in the applied code:
 
 Report any findings. These are advisory — they don't block the pipeline but should be fixed before merge.
 
-### 8. Report
+### 8. Report and approval handoff
 
-Always finish with a concise report using this structure:
+Always finish with a concise report using this structure. After the report is reviewed, export the sender email metadata to the approval JSON required by the integration validator; do not ask the user to type a second yes/no confirmation.
 
 ## Patch pipeline report
 

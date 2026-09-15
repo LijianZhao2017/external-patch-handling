@@ -48,8 +48,8 @@ The pipeline uses three branch roles with distinct responsibilities:
 │  • Deleted after integration                    │
 └──────────────────────┬──────────────────────────┘
                        │
-              sender blessing
-              cherry-pick commits
+              verified approval record
+              cherry-pick all review commits
                        │
                        ▼
 ┌─────────────────────────────────────────────────┐
@@ -106,9 +106,9 @@ The pipeline uses three branch roles with distinct responsibilities:
 - Only receives commits that have passed all review gates:
   1. ✅ Format validation (Step 1)
   2. ✅ Clean application (Step 2)
-  3. ✅ Functional equivalence check (Step 3)
-  4. ✅ Build and test pass (Step 4)
-  5. ✅ Sender blessing / approval (Step 5)
+  3. ✅ Functional equivalence check: every file is `MATCH`, no `EXTRA` (Step 3)
+  4. ✅ Build and test evidence has no `FAIL`/`TIMEOUT`/`ERROR` (Step 4)
+  5. ✅ Scoped approval email record matches the exact report and review commits (Step 5)
 - Commits arrive via GitHub PR merge from the integrate branch
 - History stays clean — no direct pushes from patch review
 
@@ -126,8 +126,9 @@ validation          review/<date>/<slug>       vs actual receiver diff
 
 Step 4: TEST             Step 5: INTEGRATE
 ─────────────           ──────────────────────────────────────────
-Build + unit tests  ──►  Sender approves
-on review branch         cherry-pick commits to integrate/<date>/<slug>
+Build + unit tests  ──►  Validate approval record
+on review branch         cherry-pick every review-branch commit
+                         (including cleanup commits) to integrate/<date>/<slug>
                          push + open GitHub PR → working branch
                          delete review branch after PR merge
 ```
@@ -187,8 +188,11 @@ Conflicts are handled at two stages:
 - The working branch is untouched
 
 ### During Integration (Step 5)
-- `git cherry-pick` from review → integrate branch
-- If conflicts occur (rare after equivalence check), the pipeline offers
-  abort/continue options
-- Only fully clean cherry-picks make it to the integrate branch, which is
-  then opened as a GitHub PR targeting the working branch
+- The validator checks apply completion, strict equivalence, test results, and
+  an email approval record scoped to the exact report and full review commit list.
+- `git cherry-pick` includes every commit unique to review → integrate branch,
+  including post-apply cleanup or conflict-resolution commits.
+- If a conflict occurs, the automation aborts and cleans up the integrate branch;
+  a skill can then report the blocker without waiting for a prompt.
+- Only fully clean cherry-picks make it to the integrate branch, which is then
+  opened as a GitHub PR targeting the working branch.

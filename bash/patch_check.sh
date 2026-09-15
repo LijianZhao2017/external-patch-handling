@@ -88,39 +88,43 @@ get_diff_stats() {
   echo "$insertions:$deletions"
 }
 
-# Calculate similarity percentage
+# Calculate a bounded similarity percentage for the change categories present.
 calc_similarity() {
   local sent_adds=$1
   local sent_dels=$2
   local recv_adds=$3
   local recv_dels=$4
-  
-  local total_sent=$((sent_adds + sent_dels))
-  local total_recv=$((recv_adds + recv_dels))
-  
-  # Both empty = 100% match
-  if [[ $total_sent -eq 0 && $total_recv -eq 0 ]]; then
+  local add_score=-1
+  local del_score=-1
+
+  if [[ $sent_adds -gt 0 || $recv_adds -gt 0 ]]; then
+    if [[ $sent_adds -eq 0 || $recv_adds -eq 0 ]]; then
+      add_score=0
+    else
+      local add_max=$((sent_adds > recv_adds ? sent_adds : recv_adds))
+      local add_min=$((sent_adds < recv_adds ? sent_adds : recv_adds))
+      add_score=$((add_min * 100 / add_max))
+    fi
+  fi
+  if [[ $sent_dels -gt 0 || $recv_dels -gt 0 ]]; then
+    if [[ $sent_dels -eq 0 || $recv_dels -eq 0 ]]; then
+      del_score=0
+    else
+      local del_max=$((sent_dels > recv_dels ? sent_dels : recv_dels))
+      local del_min=$((sent_dels < recv_dels ? sent_dels : recv_dels))
+      del_score=$((del_min * 100 / del_max))
+    fi
+  fi
+
+  if [[ $add_score -lt 0 && $del_score -lt 0 ]]; then
     echo 100
-    return
+  elif [[ $add_score -lt 0 ]]; then
+    echo "$del_score"
+  elif [[ $del_score -lt 0 ]]; then
+    echo "$add_score"
+  else
+    echo $(((add_score + del_score) / 2))
   fi
-  
-  # One empty, other not = 0% match
-  if [[ $total_sent -eq 0 || $total_recv -eq 0 ]]; then
-    echo 0
-    return
-  fi
-  
-  # Calculate overlap: what percentage of sender changes are present in receiver
-  # Simple metric: min adds and dels as percentage of sent
-  local matched=0
-  if [[ $sent_adds -gt 0 ]]; then
-    matched=$((recv_adds * 100 / sent_adds))
-  fi
-  if [[ $sent_dels -gt 0 ]]; then
-    matched=$(((matched + recv_dels * 100 / sent_dels) / 2))
-  fi
-  
-  echo "$matched"
 }
 
 # ============================================================================
@@ -129,6 +133,9 @@ calc_similarity() {
 
 if [[ ! -d "$REPO_PATH" ]]; then
   die "Repo path does not exist: $REPO_PATH"
+fi
+if [[ ! "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  die "Invalid staging date '$DATE'; expected YYYY-MM-DD"
 fi
 
 STAGING_DIR="$REPO_PATH/$STAGING_PATH/$DATE"
@@ -146,10 +153,12 @@ fi
 # ============================================================================
 
 REVIEW_BRANCH=$(grep -oP '"branch":\s*"\K[^"]+' "$APPLY_DATA_FILE")
+BASE_BRANCH=$(grep -oP '"base":\s*"\K[^"]+' "$APPLY_DATA_FILE" || true)
+BASE_BRANCH="${BASE_BRANCH:-$WORKING_BRANCH}"
 if [[ -z "$REVIEW_BRANCH" ]]; then
   die "Could not extract review branch from apply_data.json"
 fi
-log_info "Checking equivalence for $REVIEW_BRANCH"
+log_info "Checking equivalence for $REVIEW_BRANCH against $BASE_BRANCH"
 
 PATCHES=($(find "$STAGING_DIR" -maxdepth 1 -name "*.patch" -type f | sort))
 if [[ ${#PATCHES[@]} -eq 0 ]]; then
@@ -215,7 +224,7 @@ for patch_file in "${PATCHES[@]}"; do
     awk '
       /^diff --git a\// {
         if (file != "") print file ":" adds ":" dels
-        file=$4; gsub(/^a\//, "", file); gsub(/ b\/.*/, "", file)
+        file=$3; gsub(/^a\//, "", file); gsub(/ b\/.*/, "", file)
         adds=0; dels=0
         next
       }
@@ -227,7 +236,7 @@ for patch_file in "${PATCHES[@]}"; do
 done
 
 # Get receiver's actual changes
-RECV_DIFF=$(git_run diff "$WORKING_BRANCH..$REVIEW_BRANCH" || echo "")
+RECV_DIFF=$(git_run diff "$BASE_BRANCH..$REVIEW_BRANCH" || echo "")
 
 declare -A RECV_ADDS
 declare -A RECV_DELS
@@ -243,7 +252,7 @@ done < <(
       if (file != "") {
         print file ":" adds ":" dels
       }
-      file=$4; gsub(/^a\//, "", file); gsub(/ b\/.*/, "", file)
+      file=$3; gsub(/^a\//, "", file); gsub(/ b\/.*/, "", file)
       adds=0; dels=0
       next
     }
@@ -261,6 +270,8 @@ echo "| Status | File | Sent +/- | Recv +/- | Match |"
 echo "|--------|------|----------|----------|-------|"
 
 RESULTS=()
+CHECK_RESULTS_FILE=$(mktemp /tmp/patch-pipeline-check-XXXXXX.tsv)
+trap 'rm -f "$CHECK_RESULTS_FILE"' EXIT
 MATCH_COUNT=0
 PARTIAL_COUNT=0
 MISMATCH_COUNT=0
@@ -279,23 +290,23 @@ for file in "${!PATCH_FILES[@]}"; do
     echo "| MISSING | $file | +$sent_adds/-$sent_dels | +0/-0 | 0% |"
     MISSING_COUNT=$((MISSING_COUNT + 1))
     RESULTS+=("MISSING:$file")
+    printf '%s\tMISSING\t0\t%s\t0\t%s\t0\n' "$file" "$sent_adds" "$sent_dels" >> "$CHECK_RESULTS_FILE"
   else
     # Calculate similarity
     similarity=$(calc_similarity "$sent_adds" "$sent_dels" "$recv_adds" "$recv_dels")
-    
+    status="MISMATCH"
     if [[ $similarity -ge 75 ]]; then
-      echo "| MATCH   | $file | +$sent_adds/-$sent_dels | +$recv_adds/-$recv_dels | ${similarity}% |"
+      status="MATCH"
       MATCH_COUNT=$((MATCH_COUNT + 1))
-      RESULTS+=("MATCH:$file")
     elif [[ $similarity -ge 40 ]]; then
-      echo "| PARTIAL | $file | +$sent_adds/-$sent_dels | +$recv_adds/-$recv_dels | ${similarity}% |"
+      status="PARTIAL"
       PARTIAL_COUNT=$((PARTIAL_COUNT + 1))
-      RESULTS+=("PARTIAL:$file")
     else
-      echo "| MISMATCH| $file | +$sent_adds/-$sent_dels | +$recv_adds/-$recv_dels | ${similarity}% |"
       MISMATCH_COUNT=$((MISMATCH_COUNT + 1))
-      RESULTS+=("MISMATCH:$file")
     fi
+    printf '| %-7s | %s | +%s/-%s | +%s/-%s | %s%% |\n' "$status" "$file" "$sent_adds" "$sent_dels" "$recv_adds" "$recv_dels" "$similarity"
+    RESULTS+=("$status:$file")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$file" "$status" "$similarity" "$sent_adds" "$recv_adds" "$sent_dels" "$recv_dels" >> "$CHECK_RESULTS_FILE"
   fi
 done
 
@@ -307,6 +318,7 @@ for file in "${!RECV_ADDS[@]}"; do
     echo "| EXTRA   | $file | +0/-0 | +$recv_adds/-$recv_dels | N/A |"
     EXTRA_COUNT=$((EXTRA_COUNT + 1))
     RESULTS+=("EXTRA:$file")
+    printf '%s\tEXTRA\t0\t0\t%s\t0\t%s\n' "$file" "$recv_adds" "$recv_dels" >> "$CHECK_RESULTS_FILE"
   fi
 done
 
@@ -326,21 +338,44 @@ else
   log_warn "Significant divergence detected — confirm intent with sender"
 fi
 
-# Save check data for report
-CHECK_DATA=$(cat <<EOF
-{
-  "date": "$DATE",
-  "review_branch": "$REVIEW_BRANCH",
-  "match": $MATCH_COUNT,
-  "partial": $PARTIAL_COUNT,
-  "mismatch": $MISMATCH_COUNT,
-  "missing": $MISSING_COUNT,
-  "extra": $EXTRA_COUNT,
-  "total_files_touched": ${#PATCH_FILES[@]},
-  "results": [$(printf '"%s",' "${RESULTS[@]}" | sed 's/,$//')]
-}
-EOF
-)
+# Save the same structured schema emitted by the Python implementation.
+python3 - "$STAGING_DIR" "$DATE" "$REVIEW_BRANCH" "$BASE_BRANCH" "$MATCH_COUNT" "$PARTIAL_COUNT" "$MISMATCH_COUNT" "$MISSING_COUNT" "$EXTRA_COUNT" "$CHECK_RESULTS_FILE" <<'PYJSON'
+import json
+import sys
+from pathlib import Path
 
-echo "$CHECK_DATA" | tee "$STAGING_DIR/check_data.json" > /dev/null
+staging = Path(sys.argv[1])
+date, review_branch, base_branch = sys.argv[2:5]
+counts = [int(value) for value in sys.argv[5:10]]
+results_file = Path(sys.argv[10])
+files = []
+for line in results_file.read_text().splitlines():
+    filename, status, similarity, sender_added, receiver_added, sender_removed, receiver_removed = line.split("\t")
+    files.append({
+        "file": filename,
+        "status": status,
+        "similarity": int(similarity) / 100,
+        "sender_added": int(sender_added),
+        "receiver_added": int(receiver_added),
+        "sender_removed": int(sender_removed),
+        "receiver_removed": int(receiver_removed),
+        "functions": [],
+    })
+match, partial, mismatch, missing, extra = counts
+data = {
+    "date": date,
+    "review_branch": review_branch,
+    "base_branch": base_branch,
+    "files": files,
+    "overall": "PASS" if partial == mismatch == missing == extra == 0 else "NEEDS REVIEW",
+    "summary": {
+        "match": match,
+        "partial": partial,
+        "mismatch": mismatch,
+        "missing": missing,
+        "extra": extra,
+    },
+}
+(staging / "check_data.json").write_text(json.dumps(data, indent=2) + "\n")
+PYJSON
 log_info "Check data saved to $STAGING_DIR/check_data.json"

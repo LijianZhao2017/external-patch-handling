@@ -29,6 +29,7 @@ from utils import (
     rewrite_patch_with_stripped_prefix,
     slugify,
     today_str,
+    validate_staging_date,
 )
 
 
@@ -84,6 +85,7 @@ def apply_patches(staging_dir: Path, cfg: Config) -> dict:
     try:
         ensure_local_branch(repo, base_branch)
         git_run("checkout", base_branch, cwd=repo)
+        base_commit = git_run("rev-parse", "HEAD", cwd=repo).stdout.strip()
     except GitError as e:
         print(f"❌ {e}")
         sys.exit(1)
@@ -156,12 +158,13 @@ def apply_patches(staging_dir: Path, cfg: Config) -> dict:
         # Get the commit hash just created
         log = git_run("log", "-1", "--format=%H %s", cwd=repo)
         parts = log.stdout.strip().split(" ", 1)
-        applied.append({"hash": parts[0][:12], "subject": parts[1] if len(parts) > 1 else ""})
+        applied.append({"hash": parts[0], "subject": parts[1] if len(parts) > 1 else ""})
 
     # Result summary
     apply_data = {
         "branch": branch_name,
         "base": base_branch,
+        "base_commit": base_commit,
         "applied": applied,
         "failed": failed,
         "total": len(patches),
@@ -193,6 +196,11 @@ def main():
     parser.add_argument("--repo", help="Path to git repo (default: cwd)")
     args = parser.parse_args()
 
+    try:
+        validate_staging_date(args.date)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
     cfg = Config.load(args.repo)
     staging = cfg.staging_path / args.date
 

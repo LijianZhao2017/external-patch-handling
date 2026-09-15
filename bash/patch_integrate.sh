@@ -2,8 +2,8 @@
 # Step 5: Integrate approved patches — create PR branch and open GitHub PR
 #
 # Usage:
-#     ./patch_integrate.sh                   # integrate today's patches
-#     ./patch_integrate.sh --date 2026-03-25 # integrate specific date
+#     ./patch_integrate.sh --approval-file /path/to/approval.json
+#     ./patch_integrate.sh --date 2026-03-25 --approval-file /path/to/approval.json
 #
 # Creates an integrate/<date>/<slug> branch, cherry-picks commits from the
 # review branch, pushes to origin, and opens a GitHub PR via the gh CLI.
@@ -20,6 +20,7 @@ DATE="${DATE:-$(date +%Y-%m-%d)}"
 STAGING_PATH="${STAGING_PATH:-.patch-staging}"
 WORKING_BRANCH="${PATCH_PIPELINE_WORKING_BRANCH:-main}"
 INTEGRATE_BRANCH_PREFIX="${PATCH_PIPELINE_INTEGRATE_BRANCH_PREFIX:-integrate}"
+APPROVAL_FILE=""
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -32,9 +33,9 @@ while [[ $# -gt 0 ]]; do
       REPO_PATH="$2"
       shift 2
       ;;
-    --force)
-      FORCE_FLAG=true
-      shift
+    --approval-file)
+      APPROVAL_FILE="$2"
+      shift 2
       ;;
     --help)
       sed -n '2,/^$/p' "$0" | sed 's/^# //'
@@ -79,10 +80,19 @@ git_run() {
 if [[ ! -d "$REPO_PATH" ]]; then
   die "Repo path does not exist: $REPO_PATH"
 fi
+if [[ ! "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  die "Invalid staging date '$DATE'; expected YYYY-MM-DD"
+fi
 
 STAGING_DIR="$REPO_PATH/$STAGING_PATH/$DATE"
 if [[ ! -d "$STAGING_DIR" ]]; then
   die "No staging directory for $DATE"
+fi
+if [[ -z "$APPROVAL_FILE" ]]; then
+  die "--approval-file is required; export the approval email as a scoped JSON record"
+fi
+if [[ ! -f "$APPROVAL_FILE" ]]; then
+  die "Approval file does not exist: $APPROVAL_FILE"
 fi
 
 APPLY_DATA_FILE="$STAGING_DIR/apply_data.json"
@@ -91,14 +101,17 @@ if [[ ! -f "$APPLY_DATA_FILE" ]]; then
 fi
 
 TEST_DATA_FILE="$STAGING_DIR/test_data.json"
-if [[ ! -f "$TEST_DATA_FILE" ]]; then
-  log_warn "No test_data.json found. Tests may not have been run."
-fi
-
 REPORT_FILE="$STAGING_DIR/REVIEW_REPORT.md"
 REPORT_FILE_HTML="$STAGING_DIR/REVIEW_REPORT.html"
 
 log_info "Integrating patches from $DATE"
+
+if ! PYTHONPATH="$SCRIPT_DIR/../python" python3 "$SCRIPT_DIR/../python/approval.py" \
+    --repo "$REPO_PATH" \
+    --staging "$STAGING_DIR" \
+    --approval-file "$APPROVAL_FILE"; then
+  die "Integration evidence validation failed"
+fi
 
 # ============================================================================
 # Extract review branch from apply_data and derive integrate branch
@@ -110,51 +123,28 @@ if [[ -z "$REVIEW_BRANCH" ]]; then
 fi
 
 # Derive integrate branch: review/<date>/<slug> → integrate/<date>/<slug>
+BASE_BRANCH=$(grep -oP '"base":\s*"\K[^"]+' "$APPLY_DATA_FILE" || echo "$WORKING_BRANCH")
+WORKING_BRANCH="${BASE_BRANCH:-$WORKING_BRANCH}"
 BRANCH_SUFFIX="${REVIEW_BRANCH#*/}"  # strip first segment (e.g. "review")
 INTEGRATE_BRANCH="${INTEGRATE_BRANCH_PREFIX}/${BRANCH_SUFFIX}"
+BASE_COMMIT=$(grep -oP '"base_commit":\s*"\K[^"]+' "$STAGING_DIR/approval_data.json" | tail -1 || echo "")
+APPROVAL_SENDER=$(grep -oP '"sender":\s*"\K[^"]+' "$STAGING_DIR/approval_data.json" | head -1 || echo "")
+APPROVAL_MESSAGE_ID=$(grep -oP '"message_id":\s*"\K[^"]+' "$STAGING_DIR/approval_data.json" | head -1 || echo "")
 
 log_info "Review branch:    $REVIEW_BRANCH"
 log_info "Integrate branch: $INTEGRATE_BRANCH"
 log_info "Target branch:    $WORKING_BRANCH"
+log_info "Approval:         $APPROVAL_SENDER / $APPROVAL_MESSAGE_ID"
 
 if ! git_run show-ref --verify --quiet "refs/heads/$REVIEW_BRANCH"; then
   die "Review branch does not exist: $REVIEW_BRANCH"
 fi
 
-# ============================================================================
-# Approval Check
-# ============================================================================
-
-echo ""
-echo "────────────────────────────────────────────────────────────"
-echo "📋 Integration Approval Check"
-echo "────────────────────────────────────────────────────────────"
-echo ""
-
 if [[ -f "$REPORT_FILE_HTML" ]]; then
-  log_info "HTML report (open this for review): $REPORT_FILE_HTML"
+  log_info "HTML report: $REPORT_FILE_HTML"
 fi
-
 if [[ -f "$REPORT_FILE" ]]; then
-  log_info "Review report available at: $REPORT_FILE"
-  echo ""
-  if grep -qi -- '- \[x\].*\*\*LGTM\*\*' "$REPORT_FILE" 2>/dev/null; then
-    log_success "Report shows LGTM approval"
-  else
-    log_warn "Report exists but LGTM status not explicitly marked"
-  fi
-else
-  log_warn "No review report found at $REPORT_FILE"
-fi
-
-echo ""
-echo "Has the sender blessed these changes? (yes/no)"
-read -p "Enter confirmation [no]: " -r blessed
-blessed=$(echo "$blessed" | tr '[:upper:]' '[:lower:]')
-
-if [[ "$blessed" != "yes" && "$blessed" != "y" ]]; then
-  log_warn "Sender blessing required before integration. Aborted."
-  exit 0
+  log_info "Markdown report: $REPORT_FILE"
 fi
 
 # ============================================================================
@@ -162,7 +152,7 @@ fi
 # ============================================================================
 
 echo ""
-STATUS=$(git_run status --porcelain | grep -v "^?" || echo "")
+STATUS=$(git_run status --porcelain --untracked-files=all | awk -v ignored="$STAGING_PATH" '{ path = substr($0, 4); if (path != ignored && index(path, ignored "/") != 1) print }')
 if [[ -n "$STATUS" ]]; then
   die "Working tree is not clean. Commit or stash changes first."
 fi
@@ -189,50 +179,37 @@ if git_run show-ref --verify --quiet "refs/heads/$INTEGRATE_BRANCH" 2>/dev/null;
 fi
 git_run checkout -b "$INTEGRATE_BRANCH"
 
-# Get commits from review branch
-REVIEW_BASE=$(git_run merge-base "$WORKING_BRANCH" "$REVIEW_BRANCH")
-COMMITS=$(git_run log --oneline --reverse "$REVIEW_BASE..$REVIEW_BRANCH")
+# Get every commit unique to the reviewed branch, including cleanup commits.
+if [[ -z "$BASE_COMMIT" ]]; then
+  die "Approval verification did not record the review base commit"
+fi
+COMMITS=$(git_run rev-list --reverse --first-parent "$BASE_COMMIT..$REVIEW_BRANCH")
 
 if [[ -z "$COMMITS" ]]; then
-  log_warn "No new commits to cherry-pick"
-  exit 0
+  die "No reviewed commits to cherry-pick"
 fi
 
-CHERRY_PICK_FAILED=false
-while IFS= read -r line; do
-  COMMIT_HASH=$(echo "$line" | awk '{print $1}')
-
+while IFS= read -r COMMIT_HASH; do
+  [[ -z "$COMMIT_HASH" ]] && continue
   printf "  Cherry-picking %s ... " "$COMMIT_HASH"
-  if git_run cherry-pick "$COMMIT_HASH" > /dev/null 2>&1; then
+  PARENT_COUNT=$(git_run rev-list --parents -n 1 "$COMMIT_HASH" | awk '{print NF - 1}')
+  CHERRY_PICK_ARGS=("$COMMIT_HASH")
+  if [[ "$PARENT_COUNT" -gt 1 ]]; then
+    CHERRY_PICK_ARGS=(-m 1 "$COMMIT_HASH")
+  fi
+  if git_run cherry-pick "${CHERRY_PICK_ARGS[@]}" > /dev/null 2>&1; then
     echo "✅"
   else
     echo "❌"
     log_warn "Cherry-pick conflict on $COMMIT_HASH"
-    echo ""
-    echo "To resolve:"
-    echo "  1. Fix conflicts in listed files"
-    echo "  2. git add <files>"
-    echo "  3. git cherry-pick --continue"
-    echo ""
-    read -p "Abort cherry-pick and clean up integrate branch? (Y/n): " -r abort_choice
-    abort_choice=$(echo "${abort_choice:-y}" | tr '[:upper:]' '[:lower:]')
-    if [[ "$abort_choice" != "n" ]]; then
-      git_run cherry-pick --abort 2>/dev/null || true
-      git_run checkout "$ORIGINAL_BRANCH" 2>/dev/null || true
-      git_run branch -D "$INTEGRATE_BRANCH" 2>/dev/null || true
-      log_warn "Cherry-pick aborted and integrate branch cleaned up."
-    fi
-    CHERRY_PICK_FAILED=true
-    break
+    git_run cherry-pick --abort 2>/dev/null || true
+    git_run checkout "$ORIGINAL_BRANCH" 2>/dev/null || true
+    git_run branch -D "$INTEGRATE_BRANCH" 2>/dev/null || true
+    die "Cherry-pick aborted and integrate branch cleaned up"
   fi
-done < <(echo "$COMMITS")
+done <<< "$COMMITS"
 
-if [[ "$CHERRY_PICK_FAILED" == "true" ]]; then
-  log_warn "Integration incomplete due to cherry-pick conflict"
-  exit 1
-fi
-
-log_success "All commits cherry-picked to $INTEGRATE_BRANCH"
+log_success "All reviewed commits cherry-picked to $INTEGRATE_BRANCH"
 
 # ============================================================================
 # Push integrate branch to origin
@@ -243,7 +220,7 @@ log_info "Pushing $INTEGRATE_BRANCH to origin..."
 if git_run push origin "$INTEGRATE_BRANCH"; then
   log_success "Branch pushed."
 else
-  log_warn "Push failed. Push manually: git push origin $INTEGRATE_BRANCH"
+  die "Push failed. Push manually: git push origin $INTEGRATE_BRANCH"
 fi
 
 # ============================================================================
@@ -257,7 +234,9 @@ PR_TITLE="Integrate: $(git_run log -1 --format="%s" "$INTEGRATE_BRANCH")"
 PR_BODY="Integrated patches via patch-pipeline.
 
 Review branch: $REVIEW_BRANCH
-Integrate branch: $INTEGRATE_BRANCH"
+Integrate branch: $INTEGRATE_BRANCH
+Approval sender: $APPROVAL_SENDER
+Approval message ID: $APPROVAL_MESSAGE_ID"
 
 PR_URL=""
 if command -v gh &> /dev/null; then
@@ -282,14 +261,21 @@ fi
 # ============================================================================
 
 INTEGRATE_DATA_FILE="$STAGING_DIR/integrate_data.json"
-cat > "$INTEGRATE_DATA_FILE" << EOF
-{
-  "review_branch": "$REVIEW_BRANCH",
-  "integrate_branch": "$INTEGRATE_BRANCH",
-  "base_branch": "$WORKING_BRANCH",
-  "pr_url": "$PR_URL"
+python3 - "$INTEGRATE_DATA_FILE" "$REVIEW_BRANCH" "$INTEGRATE_BRANCH" "$WORKING_BRANCH" "$PR_URL" "$APPROVAL_SENDER" "$APPROVAL_MESSAGE_ID" <<'PYJSON'
+import json
+import sys
+from pathlib import Path
+
+output, review_branch, integrate_branch, base_branch, pr_url, sender, message_id = sys.argv[1:]
+data = {
+    "review_branch": review_branch,
+    "integrate_branch": integrate_branch,
+    "base_branch": base_branch,
+    "pr_url": pr_url,
+    "approval": {"sender": sender, "message_id": message_id},
 }
-EOF
+Path(output).write_text(json.dumps(data, indent=2) + "\n")
+PYJSON
 log_info "Integrate data saved to $INTEGRATE_DATA_FILE"
 
 # ============================================================================
@@ -298,7 +284,11 @@ log_info "Integrate data saved to $INTEGRATE_DATA_FILE"
 
 echo ""
 echo "────────────────────────────────────────────────────────────"
-log_success "Integration complete!"
-[[ -n "$PR_URL" ]] && echo "   PR: $PR_URL"
+if [[ -n "$PR_URL" ]]; then
+  log_success "Integration complete; PR created."
+  echo "   PR: $PR_URL"
+else
+  log_warn "Integration branch ready; PR creation is pending."
+fi
 echo "   Branch: $INTEGRATE_BRANCH"
 echo "   Target: $WORKING_BRANCH"

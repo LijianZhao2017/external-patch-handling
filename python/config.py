@@ -44,6 +44,7 @@ class Config:
     # Build & test commands (empty = skip)
     build_command: str = ""
     unit_test_command: str = ""
+    test_timeout_seconds: int = 600
 
     # Limits
     max_patch_size_kb: int = 500
@@ -80,8 +81,8 @@ class Config:
             if env_val is not None:
                 if fld == "repo_path":
                     cfg.repo_path = Path(env_val).resolve()
-                elif fld == "max_patch_size_kb":
-                    cfg.max_patch_size_kb = int(env_val)
+                elif fld in ("max_patch_size_kb", "test_timeout_seconds"):
+                    setattr(cfg, fld, int(env_val))
                 elif fld == "allowed_path_prefixes":
                     cfg.allowed_path_prefixes = [p.strip() for p in env_val.split(",") if p.strip()]
                 else:

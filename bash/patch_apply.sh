@@ -149,6 +149,9 @@ prepare_patch_for_repo() {
 if [[ ! -d "$REPO_PATH" ]]; then
   die "Repo path does not exist: $REPO_PATH"
 fi
+if [[ ! "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  die "Invalid staging date '$DATE'; expected YYYY-MM-DD"
+fi
 
 STAGING_DIR="$REPO_PATH/$STAGING_PATH/$DATE"
 if [[ ! -d "$STAGING_DIR" ]]; then
@@ -194,6 +197,7 @@ echo ""
 
 ensure_local_branch "$BASE_BRANCH"
 git_run checkout "$BASE_BRANCH" > /dev/null
+BASE_COMMIT=$(git_run rev-parse HEAD)
 
 # Create review branch
 if git_run show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
@@ -232,7 +236,7 @@ for i in "${!PATCHES[@]}"; do
     commit_record=$(git_run log -1 --format='%H%x1f%s')
     commit_hash="${commit_record%%$'\x1f'*}"
     commit_subject="${commit_record#*$'\x1f'}"
-    printf '%s\t%s\n' "${commit_hash:0:12}" "$commit_subject" >> "$APPLIED_TMP"
+    printf '%s\t%s\n' "$commit_hash" "$commit_subject" >> "$APPLIED_TMP"
   else
     echo "❌ CONFLICT"
     FAILED=true
@@ -286,7 +290,7 @@ else
   echo "Review branch: $BRANCH_NAME"
 fi
 
-python3 - "$STAGING_DIR" "$BRANCH_NAME" "$BASE_BRANCH" "$TOTAL" "$FAILED" "$FAILED_PATCH" "$FAILED_INDEX" "$FAILED_ERROR" "$FAILED_PREFIX" "$FAILED_APPLY_CHECK" "$APPLIED_TMP" <<'PY'
+python3 - "$STAGING_DIR" "$BRANCH_NAME" "$BASE_BRANCH" "$BASE_COMMIT" "$TOTAL" "$FAILED" "$FAILED_PATCH" "$FAILED_INDEX" "$FAILED_ERROR" "$FAILED_PREFIX" "$FAILED_APPLY_CHECK" "$APPLIED_TMP" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -294,14 +298,15 @@ from pathlib import Path
 staging = Path(sys.argv[1])
 branch = sys.argv[2]
 base = sys.argv[3]
-total = int(sys.argv[4])
-failed = sys.argv[5] == "true"
-failed_patch = sys.argv[6]
-failed_index = int(sys.argv[7]) if sys.argv[7] else 0
-failed_error = sys.argv[8]
-failed_prefix = sys.argv[9] or None
-failed_apply_check = sys.argv[10]
-applied_tsv = Path(sys.argv[11])
+base_commit = sys.argv[4]
+total = int(sys.argv[5])
+failed = sys.argv[6] == "true"
+failed_patch = sys.argv[7]
+failed_index = int(sys.argv[8]) if sys.argv[8] else 0
+failed_error = sys.argv[9]
+failed_prefix = sys.argv[10] or None
+failed_apply_check = sys.argv[11]
+applied_tsv = Path(sys.argv[12])
 
 applied = []
 for line in applied_tsv.read_text().splitlines():
@@ -313,6 +318,7 @@ for line in applied_tsv.read_text().splitlines():
 data = {
     "branch": branch,
     "base": base,
+    "base_commit": base_commit,
     "applied": applied,
     "failed": None,
     "total": total,

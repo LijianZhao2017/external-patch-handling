@@ -13,8 +13,8 @@ The system has dual implementations: Python scripts and bash alternatives. Both 
 1. **patch_receive.py/sh** — Receive patches from a shared folder, validate format, check for binary files and path violations, stage for downstream processing
 2. **patch_apply.py/sh** — Apply staged patches to a dedicated `review/<date>/<slug>` branch using `git am --3way`, pausing on conflicts
 3. **patch_check.py/sh** ⭐ **Key** — Compare sender's intended changes (patch) vs. actual receiver changes (git diff). Classify as MATCH/PARTIAL/MISMATCH/MISSING/EXTRA based on similarity thresholds (75%/40%)
-4. **patch_test.py/sh** — Run build + unit tests, prompt for silicon test results
-5. **patch_report.py/patch_integrate.py/sh** — Generate review report (REVIEW_REPORT.md), integrate after LGTM
+4. **patch_test.py/sh** — Run build + unit tests, accept explicit silicon results, default safely to PENDING without a TTY
+5. **patch_report.py/patch_integrate.py/sh** — Generate review report, validate all evidence and scoped email approval, integrate only on a clean gate
 
 ### Data Flow
 
@@ -25,21 +25,23 @@ The system has dual implementations: Python scripts and bash alternatives. Both 
 ├── apply_data.json         # Step 2: applied commits + branch name
 ├── check_data.json         # Step 3: ⭐ equivalence results (critical for review)
 ├── test_data.json          # Step 4: build/unit/silicon results
-└── REVIEW_REPORT.md        # Step 5: human-readable report
+├── REVIEW_REPORT.md        # Step 5: human-readable report
+└── approval_data.json      # Step 5: verified email approval provenance
 ```
 
 ### Key Modules
 
 - **config.py** — Loads settings from `.patch-pipeline.toml` (TOML) and env vars (`PATCH_PIPELINE_*`). Dataclass-based, priority: env > toml > defaults. The `resolved_working_branch` property resolves: `base_branch` (if set) → `working_branch` (if not "main") → `release/<release>` (if release set) → `"main"`
 - **utils.py** — Git wrapper (`git_run`), patch parsing (`parse_patch_header`), validation (`validate_format_patch`), path-prefix detection (`detect_patch_root_prefix`, `rewrite_patch_with_stripped_prefix`), branch helpers (`ensure_clean_worktree`, `ensure_local_branch`), formatting (`slugify`, `format_table`)
-- **patch_check.py** — Core equivalence logic: tokenizes diff content, counts +/- per file, compares sender vs receiver using similarity scoring (`_token_similarity`, `_classify`)
+- **patch_check.py** — Core equivalence logic: tokenizes diff content, counts +/- per file, compares sender vs receiver using deletion-aware similarity scoring (`_token_similarity`, `_change_similarity`, `_classify`)
+- **approval.py** — Validates apply/check/test evidence and binds email approval to the exact review-branch commits and report SHA-256
 
 ## Build, Test & Lint
 
 ### Requirements
-- Python 3.9+ (3.11+ uses the built-in `tomllib`; 3.9/3.10 auto-falls back to the `tomli` package, which must be installed)
+- Python 3.10+ (3.11+ uses the built-in `tomllib`; 3.10 auto-falls back to the `tomli` package, which must be installed)
 - git (for git operations)
-- Standard Unix tools (bash scripts only)
+- Standard Unix tools (Bash scripts also invoke Python for structured JSON and timeout handling)
 
 ### Run Tests
 ```bash
@@ -73,6 +75,7 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 - Env var overrides: `PATCH_PIPELINE_RELEASE=custom` takes precedence
 - Config is always loaded via `Config.load()` from config.py
 - Empty build/test commands mean "skip this step"
+- `test_timeout_seconds` / `PATCH_PIPELINE_TEST_TIMEOUT_SECONDS` controls build and unit-test timeouts (default: 600)
 
 ### Branch Naming
 - Review branches: `review/<YYYY-MM-DD>/<slug>` (e.g., `review/2026-03-26/fix-timing`)
@@ -81,21 +84,23 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 - Always checkout working branch before applying (default: `main`)
 
 ### Integration Flow (Step 5)
-- `patch_integrate.py` (`_derive_integrate_branch`, `integrate_patches`): checks out the working branch, creates `integrate/<date>/<slug>` (prefix configurable via `integrate_branch_prefix` / `PATCH_PIPELINE_INTEGRATE_BRANCH_PREFIX`), cherry-picks the reviewed commits from the review branch, pushes to origin, and opens a PR with `gh pr create` (`_create_github_pr`) — prints the equivalent command if `gh` is missing
+- `patch_integrate.py`/`patch_integrate.sh`: require complete apply, strict equivalence, acceptable test results, and `--approval-file`; validate the exact report hash and full ordered review-branch commit list, then cherry-pick every review commit including cleanup commits
 - The working branch never receives commits directly; only via PR merge
-- **Asymmetry**: Python has separate `patch_report.py` (Markdown + HTML) and `patch_integrate.py`. There is no `bash/patch_report.sh` — bash never generates a report; `bash/patch_integrate.sh` only checks whether `REVIEW_REPORT.md`/`.html` already exist (from a prior Python `patch_report.py` run) and prints an informational LGTM-checkbox hint before the approval prompt. `patch_integrate.py` prints the same informational hint for parity. Neither hint gates integration — the `input()` yes/no prompt is the real gate
+- Integration is noninteractive and fail-closed. A local LGTM checkbox or yes/no response is not an approval mechanism
 
 ### JSON Output Compatibility
-- All scripts (Python and bash) write to `.patch-staging/<date>/*.json`
-- Schemas are loose (dict/object); downstream steps read what they need
-- Allows Python step 1 → bash step 2 → Python step 3, etc.
+- All scripts (Python and Bash) write to `.patch-staging/<date>/*.json`
+- `check_data.json` uses `files`, `summary`, and strict `overall`; `test_data.json` is a list of `{test,result,notes}` records
+- The Python report and approval validator accept the historical Bash schemas so existing sessions remain readable
+- Allows Python step 1 → Bash step 2 → Python step 3, etc.
 
 ### Equivalence Thresholds (patch_check.py)
 - **MATCH** ≥75% token similarity: confident no review needed
 - **PARTIAL** 40–75%: manual review recommended
 - **MISMATCH** <40%: likely functional divergence
 - **MISSING**: sender touched, receiver changed nothing
-- **EXTRA**: receiver changed files sender didn't touch (adaptation is normal)
+- **EXTRA**: receiver changed files sender didn't touch (requires review)
+- Integration `overall` is `PASS` only when every file is `MATCH`; `PARTIAL`, `MISMATCH`, `MISSING`, and `EXTRA` block integration
 
 ### Error Handling
 - Git errors raised as `GitError` with command + stderr for clarity
@@ -113,7 +118,7 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 - Flag binary files (`.bin`, `.exe`, `.dll`, `.o`, `.rom`, etc.)
 - Enforce allowed path prefixes if `allowed_path_prefixes` set in config
 - Warnings are informational; don't block staging
-- Use `--force` to overwrite an existing staging session for the same date
+- Use `--force` to replace the complete existing staging session for the same date; stale patches are removed first
 
 ### Patch Path-Prefix Stripping
 - `detect_patch_root_prefix(files, repo)` detects when every file in a patch starts with `<repo-name>/` but the actual files live at the stripped path (common when sender's repo root differs from receiver's)
@@ -135,6 +140,7 @@ Python scripts are executed directly. Bash scripts are sourced or executed as-is
 - `test_branch_flow.py` — `resolved_working_branch` resolution, `ensure_clean_worktree`, `ensure_local_branch`, `_derive_integrate_branch` (uses real git repos via `tmp_path`)
 - `test_patch_path_handling.py` — `detect_patch_root_prefix` and `rewrite_patch_with_stripped_prefix` (patches where paths redundantly include the repo root dir name)
 - `test_patch_report.py` — Markdown/HTML report generation from staged JSON data
+- `test_approval.py` — integration gate, approval scope, report hash, and full review-commit validation
 
 ### Common Test Pattern
 ```python
@@ -172,4 +178,4 @@ Patches defined as multi-line strings (e.g., SIMPLE_DIFF, TWO_FILE_DIFF in test_
 
 - **README.md / README_CN.md** — User-facing overview and 5-step guide
 - **BRANCHING_STRATEGY.md / BRANCHING_STRATEGY_CN.md** — Branch naming rationale
-- **skills/public/bios-patch-pipeline/SKILL.md** — A separate, manual/ad-hoc patch-review workflow (not the `python/`/`bash/` pipeline) for messy real-world vendor patches: CRLF normalization, vendor marker detection (e.g. `//CXSH+`), archive intake. None of this logic exists in `python/`/`bash/` yet — it remains a documented-but-unimplemented hardening design
+- **skills/public/bios-patch-pipeline/SKILL.md** — Human-facing orchestration for archive intake and messy vendor patches; delegates deterministic work to the Python/Bash pipeline and exports scoped approval email metadata

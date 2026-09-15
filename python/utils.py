@@ -274,3 +274,133 @@ def format_table(headers: list[str], rows: list[list[str]]) -> str:
         ) + " |"
         lines.append(line)
     return "\n".join(lines)
+
+
+def _legacy_bool(value: object, field: str) -> bool:
+    """Read a JSON boolean, including the historical shell representation."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    raise ValueError(f"Invalid boolean value for {field}: {value!r}")
+
+
+def normalize_test_data(data: object) -> list[dict]:
+    """Normalize Python and legacy Bash test results to one list schema."""
+    if isinstance(data, list):
+        results = []
+        for index, item in enumerate(data):
+            if not isinstance(item, dict) or "test" not in item or "result" not in item:
+                raise ValueError(f"Invalid test_data entry at index {index}")
+            results.append(item)
+        return results
+
+    if not isinstance(data, dict):
+        raise ValueError("test_data.json must contain a list or object")
+
+    legacy_fields = ("build_pass", "test_pass", "silicon_result")
+    if not all(field in data for field in legacy_fields):
+        raise ValueError("test_data.json has an unsupported schema")
+
+    build_log = data.get("build_log", "")
+    test_log = data.get("test_log", "")
+    silicon_result = str(data["silicon_result"]).upper()
+    if silicon_result not in ("PASS", "FAIL", "PENDING", "SKIP", "SKIPPED"):
+        raise ValueError(f"Invalid silicon test result: {silicon_result}")
+    if silicon_result == "SKIP":
+        silicon_result = "SKIPPED"
+
+    return [
+        {
+            "test": "Build Check",
+            "result": "PASS" if _legacy_bool(data["build_pass"], "build_pass") else "FAIL",
+            "notes": f"Log: {build_log}" if build_log else "",
+        },
+        {
+            "test": "Unit Test",
+            "result": "PASS" if _legacy_bool(data["test_pass"], "test_pass") else "FAIL",
+            "notes": f"Log: {test_log}" if test_log else "",
+        },
+        {
+            "test": "Silicon Test",
+            "result": silicon_result,
+            "notes": "",
+        },
+    ]
+
+
+def normalize_check_data(data: object) -> dict:
+    """Normalize current and legacy Bash equivalence results.
+
+    The overall result is recalculated from per-file statuses so historical
+    reports cannot accidentally treat PARTIAL or EXTRA as a clean pass.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("check_data.json must contain an object")
+
+    if isinstance(data.get("files"), list):
+        files = []
+        for index, item in enumerate(data["files"]):
+            if not isinstance(item, dict) or "file" not in item or "status" not in item:
+                raise ValueError(f"Invalid check_data file entry at index {index}")
+            status = str(item["status"]).upper()
+            if status not in ("MATCH", "PARTIAL", "MISMATCH", "MISSING", "EXTRA"):
+                raise ValueError(f"Invalid equivalence status: {status}")
+            normalized = dict(item)
+            normalized["status"] = status
+            normalized.setdefault("similarity", 0.0)
+            files.append(normalized)
+    elif isinstance(data.get("results"), list):
+        files = []
+        for index, result in enumerate(data["results"]):
+            if not isinstance(result, str) or ":" not in result:
+                raise ValueError(f"Invalid legacy check result at index {index}")
+            status, filename = result.split(":", 1)
+            status = status.upper()
+            if status not in ("MATCH", "PARTIAL", "MISMATCH", "MISSING", "EXTRA"):
+                raise ValueError(f"Invalid equivalence status: {status}")
+            similarity = {
+                "MATCH": 1.0,
+                "PARTIAL": 0.5,
+                "MISMATCH": 0.0,
+                "MISSING": 0.0,
+                "EXTRA": 0.0,
+            }[status]
+            files.append({
+                "file": filename,
+                "status": status,
+                "similarity": similarity,
+                "sender_added": 0,
+                "receiver_added": 0,
+                "functions": [],
+            })
+    else:
+        raise ValueError("check_data.json has an unsupported schema")
+
+    if not files:
+        raise ValueError("check_data.json contains no file results")
+
+    statuses = [item["status"] for item in files]
+    summary = {
+        "match": statuses.count("MATCH"),
+        "partial": statuses.count("PARTIAL"),
+        "mismatch": statuses.count("MISMATCH"),
+        "missing": statuses.count("MISSING"),
+        "extra": statuses.count("EXTRA"),
+    }
+    overall = "PASS" if all(status == "MATCH" for status in statuses) else "NEEDS REVIEW"
+    return {
+        "date": data.get("date", ""),
+        "review_branch": data.get("review_branch", ""),
+        "base_branch": data.get("base_branch", ""),
+        "files": files,
+        "overall": overall,
+        "summary": summary,
+    }
+
+
+def validate_staging_date(value: str) -> str:
+    """Validate a staging session name before it is used as a path component."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError(f"Invalid staging date: {value!r}; expected YYYY-MM-DD")
+    return value

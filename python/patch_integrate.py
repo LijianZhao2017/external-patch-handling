@@ -3,8 +3,8 @@
 Step 5: Integrate blessed patches — create PR branch and open GitHub PR
 
 Usage:
-    python patch_integrate.py                      # integrate today's patches
-    python patch_integrate.py --date 2026-03-25
+    python patch_integrate.py --approval-file /path/to/approval.json
+    python patch_integrate.py --date 2026-03-25 --approval-file /path/to/approval.json
 
 Creates an integrate/<date>/<slug> branch from the working branch, cherry-picks
 commits from the review branch, pushes to origin, and opens a GitHub PR via
@@ -15,14 +15,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+from approval import ApprovalError, validate_integration_evidence
 from config import Config
-from utils import GitError, ensure_clean_worktree, ensure_local_branch, git_run, today_str
+from utils import GitError, ensure_clean_worktree, ensure_local_branch, git_run, today_str, validate_staging_date
 
 
 def _derive_integrate_branch(review_branch: str, cfg: Config) -> str:
@@ -32,14 +32,32 @@ def _derive_integrate_branch(review_branch: str, cfg: Config) -> str:
     return f"{cfg.integrate_branch_prefix}/{suffix}"
 
 
+def _cherry_pick_args(repo: Path, commit_sha: str) -> tuple[str, ...]:
+    """Use the first-parent diff when a reviewed branch contains a merge commit."""
+    parents = git_run("rev-list", "--parents", "-n", "1", commit_sha, cwd=repo).stdout.split()
+    if len(parents) > 2:
+        return ("-m", "1", commit_sha)
+    return (commit_sha,)
+
+
 def _create_github_pr(
-    repo: Path, integrate_branch: str, base_branch: str, applied: list[dict]
+    repo: Path,
+    integrate_branch: str,
+    base_branch: str,
+    applied: list[dict],
+    approval: dict,
 ) -> str | None:
     """Create a GitHub PR via gh CLI. Returns PR URL or None on failure."""
     title = f"Integrate: {applied[0]['subject'][:70]}" if applied else "Integrate patches"
     lines = ["Integrated patches via patch-pipeline:", ""]
     for c in applied:
         lines.append(f"- `{c['hash']}` {c['subject']}")
+    lines.extend([
+        "",
+        f"Approval: {approval['sender']}",
+        f"Approval message ID: `{approval['message_id']}`",
+        f"Approved at: {approval['approved_at']}",
+    ])
     body = "\n".join(lines)
 
     result = subprocess.run(
@@ -57,68 +75,37 @@ def _create_github_pr(
     return None
 
 
-def integrate_patches(staging_dir: Path, cfg: Config) -> None:
+def integrate_patches(staging_dir: Path, cfg: Config, approval_file: Path) -> None:
     """Create integrate branch, cherry-pick review commits, push, open GitHub PR."""
     repo = cfg.repo_path
-    base_branch = cfg.resolved_working_branch
 
-    # Load apply data to find the review branch and commits
-    apply_file = staging_dir / "apply_data.json"
-    if not apply_file.exists():
-        print(f"❌ No apply data found. Run patch_apply.py first.")
+    try:
+        evidence = validate_integration_evidence(repo, staging_dir, approval_file)
+    except (ApprovalError, GitError, ValueError) as exc:
+        print(f"❌ Integration blocked: {exc}")
         sys.exit(1)
+    recorded_base = evidence["apply"].get("base")
+    base_branch = recorded_base if isinstance(recorded_base, str) and recorded_base else cfg.resolved_working_branch
 
-    with open(apply_file) as f:
-        apply_data = json.load(f)
-
-    review_branch = apply_data.get("branch")
-    applied = apply_data.get("applied", [])
-
-    if not review_branch or not applied:
-        print(f"❌ No commits to integrate. Check apply_data.json.")
-        sys.exit(1)
-
-    if apply_data.get("failed"):
-        print(f"⚠️  The apply had a conflict. Only {len(applied)} of {apply_data['total']} patches were applied.")
-        try:
-            proceed = input("   Continue with partial integration? (y/N): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            proceed = "n"
-        if proceed != "y":
-            print("Aborted.")
-            sys.exit(0)
+    review_branch = evidence["review_branch"]
+    commit_shas = evidence["commit_shas"]
+    approval = evidence["approval"]
+    commit_records = []
+    for commit_sha in commit_shas:
+        subject = git_run("log", "-1", "--format=%s", commit_sha, cwd=repo).stdout.strip()
+        parents = git_run("rev-list", "--parents", "-n", "1", commit_sha, cwd=repo).stdout.split()
+        commit_records.append({"hash": commit_sha, "subject": subject, "merge": len(parents) > 2})
 
     # Derive integrate branch name
     integrate_branch = _derive_integrate_branch(review_branch, cfg)
 
-    # Sender blessing gate
     print(f"\n{'─' * 60}")
     print(f"Integration: {review_branch} → {integrate_branch} → PR → {base_branch}")
-    print(f"Commits to cherry-pick: {len(applied)}")
-    for c in applied:
-        print(f"  {c['hash']}  {c['subject'][:60]}")
+    print(f"Commits to cherry-pick: {len(commit_records)}")
+    for commit in commit_records:
+        print(f"  {commit['hash']}  {commit['subject'][:60]}")
+    print(f"Approval: {approval['sender']} / {approval['message_id']}")
     print(f"{'─' * 60}\n")
-
-    # Informational LGTM hint — does not gate integration; the input() prompt below is the real gate.
-    report_file = staging_dir / "REVIEW_REPORT.md"
-    if report_file.exists():
-        report_text = report_file.read_text(errors="ignore")
-        if re.search(r"- \[x\].*\*\*LGTM\*\*", report_text, re.IGNORECASE):
-            print(f"ℹ️  Review report shows LGTM approval: {report_file}")
-        else:
-            print(f"⚠️  Review report exists but LGTM status not explicitly marked: {report_file}")
-    else:
-        print(f"⚠️  No review report found at {report_file}")
-    print()
-
-    try:
-        blessed = input("Has the sender blessed these changes? (yes/no): ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        blessed = "no"
-
-    if blessed not in ("yes", "y"):
-        print("❌ Sender blessing required before integration. Aborted.")
-        sys.exit(0)
 
     # Ensure clean worktree
     try:
@@ -146,15 +133,16 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
             print(f"❌ Could not create branch: {result.stderr}")
         sys.exit(1)
 
-    # Cherry-pick each commit from the review branch
-    print(f"🍒 Cherry-picking {len(applied)} commit(s)...\n")
+    # Cherry-pick every commit unique to the reviewed branch, including cleanup commits.
+    print(f"🍒 Cherry-picking {len(commit_records)} commit(s)...\n")
     picked = []
 
-    for i, commit in enumerate(applied, 1):
+    for i, commit in enumerate(commit_records, 1):
         hash_val = commit["hash"]
-        print(f"  [{i}/{len(applied)}] {hash_val} {commit['subject'][:50]}...", end=" ")
+        print(f"  [{i}/{len(commit_records)}] {hash_val} {commit['subject'][:50]}...", end=" ")
 
-        result = git_run("cherry-pick", hash_val, cwd=repo, check=False)
+        cherry_pick_args = _cherry_pick_args(repo, hash_val)
+        result = git_run("cherry-pick", *cherry_pick_args, cwd=repo, check=False)
 
         if result.returncode != 0:
             print("❌ CONFLICT")
@@ -162,25 +150,20 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
             print(f"Conflict during cherry-pick of {hash_val}")
             print(f"Git output:\n{result.stderr}")
             print(f"\nTo resolve:")
-            print(f"  1. Fix conflicts")
+            print(f"  1. Fix conflicts on the integrate branch")
             print(f"  2. git add <files>")
             print(f"  3. git cherry-pick --continue")
-            try:
-                abort = input("\nAbort cherry-pick now and restore branch? (Y/n): ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                abort = "y"
-            if abort != "n":
-                git_run("cherry-pick", "--abort", cwd=repo, check=False)
-                git_run("checkout", original_branch, cwd=repo, check=False)
-                git_run("branch", "-D", integrate_branch, cwd=repo, check=False)
-                print(f"Cherry-pick aborted and integrate branch cleaned up.")
-            break
+            git_run("cherry-pick", "--abort", cwd=repo, check=False)
+            git_run("checkout", original_branch, cwd=repo, check=False)
+            git_run("branch", "-D", integrate_branch, cwd=repo, check=False)
+            print("Cherry-pick aborted and integrate branch cleaned up.")
+            sys.exit(1)
 
         print("✅")
         picked.append(commit)
 
-    if len(picked) < len(applied):
-        print(f"\n⚠️  Cherry-picked {len(picked)}/{len(applied)} commits (conflict encountered)")
+    if len(picked) != len(commit_records):
+        print(f"\n❌ Cherry-picked {len(picked)}/{len(commit_records)} commits")
         sys.exit(1)
 
     print(f"\n✅ All {len(picked)} commits cherry-picked to {integrate_branch}!")
@@ -189,10 +172,10 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
     print(f"\n📤 Pushing {integrate_branch} to origin...")
     push_result = git_run("push", "origin", integrate_branch, cwd=repo, check=False)
     if push_result.returncode != 0:
-        print(f"⚠️  Push failed: {push_result.stderr.strip()}")
+        print(f"❌ Push failed: {push_result.stderr.strip()}")
         print(f"   Push manually: git push origin {integrate_branch}")
-    else:
-        print("✅ Branch pushed.")
+        sys.exit(1)
+    print("✅ Branch pushed.")
 
     # Open GitHub PR via gh CLI
     print(f"\n🔗 Creating GitHub PR ({integrate_branch} → {base_branch})...")
@@ -201,7 +184,7 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
         print("⚠️  gh CLI not found. Create the PR manually:")
         print(f"   gh pr create --base {base_branch} --head {integrate_branch}")
     else:
-        pr_url = _create_github_pr(repo, integrate_branch, base_branch, picked)
+        pr_url = _create_github_pr(repo, integrate_branch, base_branch, picked, approval)
         if pr_url:
             print(f"✅ PR created: {pr_url}")
         else:
@@ -215,6 +198,11 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
         "base_branch": base_branch,
         "picked": picked,
         "pr_url": pr_url,
+        "approval": {
+            "sender": approval["sender"],
+            "message_id": approval["message_id"],
+            "approved_at": approval["approved_at"],
+        },
     }
     integrate_file = staging_dir / "integrate_data.json"
     with open(integrate_file, "w") as f:
@@ -222,9 +210,11 @@ def integrate_patches(staging_dir: Path, cfg: Config) -> None:
     print(f"\n💾 Integrate data saved to {integrate_file}")
 
     print(f"\n{'─' * 60}")
-    print(f"✅ Integration complete!")
     if pr_url:
+        print("✅ Integration complete; PR created.")
         print(f"   PR: {pr_url}")
+    else:
+        print("⚠️  Integration branch ready; PR creation is pending.")
     print(f"   Branch: {integrate_branch}")
     print(f"   Target: {base_branch}")
 
@@ -233,8 +223,15 @@ def main():
     parser = argparse.ArgumentParser(description="Integrate blessed patches via PR branch")
     parser.add_argument("--date", default=today_str(), help="Staging date (default: today)")
     parser.add_argument("--repo", help="Path to git repo (default: cwd)")
+    parser.add_argument("--approval-file", required=True,
+                        help="JSON approval record exported from the approval email")
     args = parser.parse_args()
 
+    try:
+        validate_staging_date(args.date)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
     cfg = Config.load(args.repo)
     staging = cfg.staging_path / args.date
 
@@ -242,7 +239,7 @@ def main():
         print(f"❌ No staged patches for {args.date}")
         sys.exit(1)
 
-    integrate_patches(staging, cfg)
+    integrate_patches(staging, cfg, Path(args.approval_file).resolve())
 
 
 if __name__ == "__main__":

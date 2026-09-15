@@ -6,6 +6,7 @@
 #     ./patch_receive.sh ./local-patches/
 #     ./patch_receive.sh ./local-patches/ --date 2026-03-25
 #     ./patch_receive.sh ./local-patches/ --force
+#     ./patch_receive.sh ./local-patches/ --note "reviewed by skill"
 #
 # Environment variables (override defaults):
 #     PATCH_PIPELINE_RELEASE
@@ -22,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_PATH="${REPO_PATH:-.}"
 DATE="${DATE:-$(date +%Y-%m-%d)}"
 FORCE_FLAG=false
+REVIEW_NOTE=""
 STAGING_PATH="${STAGING_PATH:-.patch-staging}"
 
 # Binary file extensions to flag
@@ -42,6 +44,10 @@ while [[ $# -gt 0 ]]; do
     --force)
       FORCE_FLAG=true
       shift
+      ;;
+    --note)
+      REVIEW_NOTE="$2"
+      shift 2
       ;;
     --help)
       sed -n '2,/^$/p' "$0" | sed 's/^# //'
@@ -129,6 +135,9 @@ validate_patch() {
 if [[ -z "$SOURCE_DIR" ]]; then
   die "Usage: $0 <source-dir> [--date DATE] [--force]"
 fi
+if [[ ! "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  die "Invalid staging date '$DATE'; expected YYYY-MM-DD"
+fi
 
 SOURCE_DIR=$(cd "$SOURCE_DIR" && pwd)
 if [[ ! -d "$SOURCE_DIR" ]]; then
@@ -153,8 +162,11 @@ STAGING_DIR="$REPO_PATH/$STAGING_PATH/$DATE"
 if [[ -d "$STAGING_DIR" ]] && [[ ${#PATCH_FILES[@]} -gt 0 ]] && [[ "$FORCE_FLAG" != "true" ]]; then
   # Check if staging dir already has patches
   if find "$STAGING_DIR" -maxdepth 1 -name "*.patch" -type f -quit 2>/dev/null | grep -q .; then
-    die "Staging dir already has patches for $DATE. Use --force to overwrite."
+    die "Staging dir already has patches for $DATE. Use --force to replace the complete session."
   fi
+fi
+if [[ "$FORCE_FLAG" == "true" && -d "$STAGING_DIR" ]]; then
+  rm -rf "$STAGING_DIR"
 fi
 
 mkdir -p "$STAGING_DIR"
@@ -266,7 +278,7 @@ if [[ ${#WARNINGS_TOTAL[@]} -gt 0 ]]; then
   log_warn "Total warnings: ${#WARNINGS_TOTAL[@]}"
 fi
 
-python3 - "$STAGING_DIR" <<'PY'
+python3 - "$STAGING_DIR" "$REVIEW_NOTE" <<'PY'
 import json
 import re
 import sys
@@ -303,10 +315,15 @@ def parse_patch(path: Path) -> dict:
 
 
 staging = Path(sys.argv[1])
+review_note = sys.argv[2]
 review_data = {
     "patches": [parse_patch(p) for p in sorted(staging.glob("*.patch"))],
     "all_warnings": [],
-    "reviewer_notes": {},
+    "reviewer_notes": {
+        patch.name: review_note
+        for patch in sorted(staging.glob("*.patch"))
+        if review_note
+    },
 }
 (staging / "review_data.json").write_text(json.dumps(review_data, indent=2))
 PY

@@ -19,3 +19,9 @@ def test_release_can_be_overridden_by_env(tmp_path, monkeypatch):
     cfg = Config.load(repo_path=tmp_path)
     assert cfg.release == "custom-release"
 
+
+
+def test_test_timeout_can_be_overridden_by_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATCH_PIPELINE_TEST_TIMEOUT_SECONDS", "45")
+    cfg = Config.load(repo_path=tmp_path)
+    assert cfg.test_timeout_seconds == 45

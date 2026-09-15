@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 from config import Config
-from utils import detect_patch_root_prefix, format_table, git_run, list_patches, today_str
+from utils import detect_patch_root_prefix, format_table, git_run, list_patches, today_str, validate_staging_date
 
 
 # ── Diff parsing ────────────────────────────────────────────────────────────
@@ -70,6 +70,17 @@ def _token_similarity(a: list[str], b: list[str]) -> float:
         return 1.0
     union = sa | sb
     return len(sa & sb) / len(union)
+
+
+def _change_similarity(sender: dict, receiver: dict) -> float:
+    """Compare only change categories that exist on either side."""
+    scores = []
+    for key in ("added", "removed"):
+        sent = sender[key]
+        received = receiver[key]
+        if sent or received:
+            scores.append(_token_similarity(sent, received))
+    return sum(scores) / len(scores) if scores else 1.0
 
 
 def _classify(score: float) -> str:
@@ -174,9 +185,7 @@ def check_equivalence(staging_dir: Path, cfg: Config) -> dict:
         s = sender_files[fname]
         if fname in receiver_files:
             r = receiver_files[fname]
-            add_score = _token_similarity(s["added"], r["added"])
-            rem_score = _token_similarity(s["removed"], r["removed"])
-            score = (add_score + rem_score) / 2
+            score = _change_similarity(s, r)
             status = _classify(score)
         else:
             score = 0.0
@@ -189,6 +198,8 @@ def check_equivalence(staging_dir: Path, cfg: Config) -> dict:
             "similarity": round(score, 2),
             "sender_added": len(s["added"]),
             "receiver_added": len(r["added"]),
+            "sender_removed": len(s["removed"]),
+            "receiver_removed": len(r["removed"]),
             "functions": s["functions"],
         })
 
@@ -206,6 +217,8 @@ def check_equivalence(staging_dir: Path, cfg: Config) -> dict:
                 "similarity": 0.0,
                 "sender_added": 0,
                 "receiver_added": len(receiver_files[fname]["added"]),
+                "sender_removed": 0,
+                "receiver_removed": len(receiver_files[fname]["removed"]),
                 "functions": receiver_files[fname]["functions"],
             })
 
@@ -244,7 +257,7 @@ def check_equivalence(staging_dir: Path, cfg: Config) -> dict:
             print(f"   {f}")
         print("   → Verify these are adaptation changes (context adjustments), not unintended modifications.")
 
-    overall = "PASS" if n_mismatch == 0 and n_missing == 0 else "NEEDS REVIEW"
+    overall = "PASS" if all(status == "MATCH" for status in statuses) else "NEEDS REVIEW"
     print(f"\n{'─'*60}")
     print(f"Overall: {'✅ ' if overall == 'PASS' else '⚠️  '}{overall}")
     if overall == "NEEDS REVIEW":
@@ -272,6 +285,11 @@ def main():
     args = parser.parse_args()
 
     cfg = Config.load(args.repo)
+    try:
+        validate_staging_date(args.date)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
     staging = cfg.staging_path / args.date
 
     if not staging.is_dir():

@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "python"))
 
 import pytest
-from patch_check import _parse_diff_into_files, _token_similarity, _classify
+from patch_check import _change_similarity, _parse_diff_into_files, _token_similarity, _classify
 
 
 # ── _parse_diff_into_files ────────────────────────────────────────────────
@@ -125,6 +125,13 @@ def test_similarity_empty_one_side():
 
 
 # ── _classify ────────────────────────────────────────────────────────────
+
+
+
+def test_change_similarity_detects_missing_deletions():
+    sender = {"added": [], "removed": ["old line"]}
+    receiver = {"added": [], "removed": []}
+    assert _change_similarity(sender, receiver) == 0.0
 
 def test_classify_match():
     assert _classify(0.75) == "MATCH"

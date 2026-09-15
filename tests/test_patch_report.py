@@ -133,3 +133,22 @@ def test_main_writes_html_next_to_custom_markdown_output(tmp_path, monkeypatch):
 
     assert output.exists()
     assert (output.parent / "custom-review.html").exists()
+
+
+def test_report_accepts_legacy_bash_staging_schema(tmp_path):
+    cfg = Config.load(repo_path=tmp_path)
+    staging = tmp_path / ".patch-staging" / "2026-03-25"
+    staging.mkdir(parents=True)
+    _write_json(staging / "check_data.json", {
+        "results": ["MATCH:file.txt"],
+    })
+    _write_json(staging / "test_data.json", {
+        "build_pass": True,
+        "test_pass": True,
+        "silicon_result": "PENDING",
+    })
+
+    report = patch_report.generate_report(staging, cfg)
+
+    assert "Overall: ✅ PASS" in report
+    assert "Build Check" in report

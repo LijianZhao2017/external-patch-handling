@@ -20,7 +20,7 @@ from html import escape
 from pathlib import Path
 
 from config import Config
-from utils import format_table, today_str
+from utils import format_table, normalize_check_data, normalize_test_data, today_str, validate_staging_date
 
 
 def load_json(path: Path) -> dict | list | None:
@@ -36,12 +36,31 @@ def _short(value: object, max_len: int) -> str:
     return text[:max_len]
 
 
+def _technical_gates_ready(
+    apply: dict | None,
+    check: dict | None,
+    tests: list[dict] | None,
+) -> bool:
+    """Report whether the evidence is ready for scoped approval."""
+    if not apply or apply.get("failed") or not check or check.get("overall") != "PASS" or not tests:
+        return False
+
+    results = {str(entry.get("test")): str(entry.get("result")).upper() for entry in tests}
+    return (
+        results.get("Build Check") in {"PASS", "SKIPPED"}
+        and results.get("Unit Test") in {"PASS", "SKIPPED"}
+        and results.get("Silicon Test") in {"PASS", "PENDING", "SKIPPED"}
+    )
+
+
 def _load_report_data(staging_dir: Path) -> dict[str, dict | list | None]:
+    check = load_json(staging_dir / "check_data.json")
+    tests = load_json(staging_dir / "test_data.json")
     return {
         "review": load_json(staging_dir / "review_data.json"),
         "apply": load_json(staging_dir / "apply_data.json"),
-        "check": load_json(staging_dir / "check_data.json"),
-        "tests": load_json(staging_dir / "test_data.json"),
+        "check": normalize_check_data(check) if check is not None else None,
+        "tests": normalize_test_data(tests) if tests is not None else None,
     }
 
 
@@ -53,6 +72,7 @@ def generate_report(staging_dir: Path, cfg: Config) -> str:
     apply = data["apply"]
     check = data["check"]
     tests = data["tests"]
+    gates_ready = _technical_gates_ready(apply, check, tests)
 
     lines = []
     lines.append(f"# Patch Review Report — {cfg.release} — {date_str}")
@@ -174,8 +194,12 @@ def generate_report(staging_dir: Path, cfg: Config) -> str:
     # Section 6: Recommendation
     lines.append(f"## Reviewer Recommendation")
     lines.append(f"")
-    lines.append(f"- [ ] **LGTM** — Ready for sender blessing. Recommend cherry-pick to working branch.")
-    lines.append(f"- [ ] **Changes Requested** — See notes above. Sender should revise and resubmit.")
+    if gates_ready:
+        recommendation = "Technical gates are acceptable; obtain an email approval record tied to this report and review commit set."
+    else:
+        recommendation = "Integration is blocked until apply, equivalence, and build/unit-test gates are acceptable; resolve the findings before requesting scoped approval."
+    lines.append(f"- **Recommendation** — {recommendation}")
+    lines.append(f"- **Changes Requested** — See notes above. Sender should revise and resubmit.")
     lines.append(f"")
     lines.append(f"---")
 
@@ -229,6 +253,7 @@ def generate_html_report(staging_dir: Path, cfg: Config) -> str:
     apply = data["apply"]
     check = data["check"]
     tests = data["tests"]
+    gates_ready = _technical_gates_ready(apply, check, tests)
 
     sections: list[str] = []
     summary_cards: list[str] = []
@@ -428,12 +453,14 @@ def generate_html_report(staging_dir: Path, cfg: Config) -> str:
         f"{''.join(test_content)}</section>"
     )
 
+    if gates_ready:
+        recommendation = "Technical gates are acceptable; obtain an email approval record tied to this report and review commit set."
+    else:
+        recommendation = "Integration is blocked until apply, equivalence, and build/unit-test gates are acceptable; resolve the findings before requesting scoped approval."
     sections.append(
         "<section id=\"recommendation\"><h2>Reviewer Recommendation</h2>"
-        "<label class=\"checkline\"><input type=\"checkbox\"> "
-        "<strong>LGTM</strong> — Ready for sender blessing. Recommend cherry-pick to working branch.</label>"
-        "<label class=\"checkline\"><input type=\"checkbox\"> "
-        "<strong>Changes Requested</strong> — See notes above. Sender should revise and resubmit.</label>"
+        f"<p class=\"checkline\"><strong>Recommendation:</strong> {escape(recommendation)}</p>"
+        "<p class=\"checkline\"><strong>Changes Requested:</strong> See notes above. Sender should revise and resubmit.</p>"
         "</section>"
     )
 
@@ -678,6 +705,11 @@ def main():
     args = parser.parse_args()
 
     cfg = Config.load(args.repo)
+    try:
+        validate_staging_date(args.date)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
     staging = cfg.staging_path / args.date
 
     if not staging.is_dir():
@@ -697,7 +729,7 @@ def main():
     out_path.write_text(report)
     html_out_path.write_text(html_report)
     print(f"🌐 HTML report saved to {html_out_path} (open this for review)")
-    print(f"📄 Markdown report saved to {out_path} (edit the LGTM checkbox here to approve)")
+    print(f"📄 Markdown report saved to {out_path} (approval requires a separate email approval record)")
     print(f"\n{report}")
 
 
