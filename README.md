@@ -1,114 +1,188 @@
-# Patch Review Pipeline
+<div align="center">
 
-[中文文档](README_CN.md)
+# Patch Pipeline
 
-> **Requirements:** Python 3.10+ (3.11+ recommended — uses built-in `tomllib`; on 3.10 install the `tomli` backport), git (receiver side only)
+**A skill-driven, fail-closed workflow for reviewing and integrating external patches**
+
+[中文](README_CN.md) · [Branching strategy](BRANCHING_STRATEGY.md) · [Pipeline skill](skills/public/bios-patch-pipeline/SKILL.md)
+
+`Python 3.10+` · `Git` · `Linux/macOS shell`
+
+</div>
+
+---
+
+## Why this exists
+
+External patches often arrive from a repository that has already diverged from the receiver. A patch applying cleanly does not prove that the sender's intent survived the adaptation.
+
+Patch Pipeline separates **mechanical execution** from **human authorization**:
+
+- A skill is the primary interface and orchestrates the workflow.
+- Python or Bash scripts produce deterministic, compatible JSON evidence.
+- Integration of the accepted staged set fails closed unless application, equivalence, tests, and approval all satisfy their gates.
+- Human input is limited to genuine conflicts and a scoped approval decision.
+
+> [!IMPORTANT]
+> An email saying `LGTM` is not enough by itself. Approval must identify the exact report, review branch, and ordered commit list.
+
+## Workflow at a glance
+
+```mermaid
+flowchart LR
+    Source["Patch source<br/>directory or archive"] --> Skill["Pipeline skill<br/>prepares and orchestrates"]
+    Skill --> Receive["1 · Receive<br/>validate and stage"]
+    Receive --> Apply["2 · Apply<br/>review branch"]
+    Apply --> Check["3 · Check<br/>functional equivalence"]
+    Check --> Test["4 · Test<br/>build, unit, silicon"]
+    Test --> Report["5 · Report<br/>Markdown + HTML"]
+    Report --> Approval{"Scoped approval<br/>matches evidence?"}
+    Approval -- No --> Blocked["Stop<br/>resolve or resubmit"]
+    Approval -- Yes --> Integrate["Integrate branch<br/>push + pull request"]
+```
+
+### Gate model
+
+| Gate | Pass condition | On failure |
+|---|---|---|
+| Intake | Every submitted patch is valid and accepted | Correct the rejected files and rerun receive before continuing |
+| Apply | Every accepted patch applied; no unresolved conflict | Stop on the review branch |
+| Equivalence | Every file is `MATCH`; no `PARTIAL`, `MISMATCH`, `MISSING`, or `EXTRA` | Require review or patch correction |
+| Automated tests | Build and unit tests are `PASS` or `SKIPPED` | `FAIL`, `TIMEOUT`, and `ERROR` block integration |
+| Silicon test | Result is recorded as `PASS`, `FAIL`, `PENDING`, or `SKIPPED` | `FAIL` blocks; other states remain visible to the approver |
+| Approval | Email metadata matches the report hash, branch, and full ordered commit list | Block integration |
+
+## Quick start
+
+### 1. Install
+
+Python 3.11+ includes `tomllib`. Python 3.10 is supported through the `tomli` backport in the development requirements.
 
 ```bash
 python -m pip install -r requirements-dev.txt
 ```
 
-Configure by creating `.patch-pipeline.toml` in the repo root:
+### 2. Configure
+
+Create `.patch-pipeline.toml` in the target repository:
 
 ```toml
 release = "bhs_pb2_35d44"
 base_branch = "release/bhs_pb2_35d44"
-build_command = "make -j$(nproc)"
+build_command = "make -j4"
 unit_test_command = "pytest tests/"
 test_timeout_seconds = 600
 ```
 
-Or use environment variables: `PATCH_PIPELINE_RELEASE=release-name`, `PATCH_PIPELINE_BASE_BRANCH=...`, etc.
-
----
-
-## Repository Layout
-
-```
-repo-root/
-├── python/                    # Python implementation
-│   ├── config.py
-│   ├── utils.py
-│   ├── patch_receive.py
-│   ├── patch_apply.py
-│   ├── patch_check.py
-│   ├── patch_test.py
-│   ├── patch_report.py
-│   ├── patch_integrate.py
-│   └── approval.py
-├── bash/                      # Bash orchestration (uses Python for JSON metadata)
-│   ├── patch_receive.sh
-│   ├── patch_apply.sh
-│   ├── patch_check.sh
-│   ├── patch_test.sh
-│   └── patch_integrate.sh
-├── tests/
-├── pyproject.toml
-├── requirements-dev.txt
-└── .patch-pipeline.toml       # config (optional)
-```
-
----
-
-## The 5 Steps
-
-### Step 1 — Receive & Validate Patches
+Environment variables override TOML values, for example:
 
 ```bash
-# Python
-python python/patch_receive.py /mnt/shared-patches/release-name/2026-03-26/ --no-prompt
-# Bash
-bash bash/patch_receive.sh /mnt/shared-patches/release-name/2026-03-26/
+export PATCH_PIPELINE_BASE_BRANCH="release/bhs_pb2_35d44"
+export PATCH_PIPELINE_TEST_TIMEOUT_SECONDS=900
 ```
 
-Validates each `.patch` file (must be `git format-patch` output), shows diff stats, runs static checks, and stages patches locally. Use `--force` only to replace the complete existing date session; it removes stale staged artifacts first. Use `--note "..."` when a skill needs to attach one reviewer note without opening a prompt.
+### 3. Run through the skill
 
-### Step 2 — Apply to Review Branch
+Ask the `bios-patch-pipeline` skill to process the patch source and target repository. The skill handles archive preparation and real-world patch cleanup, then delegates deterministic steps to the scripts below.
+
+<details>
+<summary><strong>Direct script commands</strong></summary>
 
 ```bash
-python python/patch_apply.py
-# or: bash bash/patch_apply.sh
+DATE=2026-09-15
+PATCH_DIR=/mnt/shared-patches/release-name/$DATE
+TARGET_REPO=/path/to/target-repo
+
+python python/patch_receive.py "$PATCH_DIR" --repo "$TARGET_REPO" --date "$DATE" --no-prompt
+python python/patch_apply.py --repo "$TARGET_REPO" --date "$DATE"
+python python/patch_check.py --repo "$TARGET_REPO" --date "$DATE"
+python python/patch_test.py --repo "$TARGET_REPO" --date "$DATE" --no-prompt --silicon-result PENDING
+python python/patch_report.py --repo "$TARGET_REPO" --date "$DATE"
+python python/patch_integrate.py --repo "$TARGET_REPO" --date "$DATE" --approval-file /path/to/approval.json
 ```
 
-Creates `review/2026-03-26/<patch-slug>` from the configured base branch and applies patches with `git am --3way`. Pauses on conflict for manual resolution.
+Receive, apply, check, test, and integrate have Bash alternatives under `bash/`; report generation is Python-only. Both execution paths produce compatible staging data.
 
-### Step 3 — Functional Equivalence Check ⭐
+</details>
+
+## The five stages
+
+### 1. Receive and validate
 
 ```bash
-python python/patch_check.py
-# or: bash bash/patch_check.sh
+python python/patch_receive.py /path/to/patches --repo "$TARGET_REPO" --date "$DATE" --no-prompt
 ```
 
-Compares what the sender *intended* (their patch) vs what *actually landed* on the receiver side. Because codebases diverge through refactoring, this tool checks the same logical changes are present per file.
+Validates `git format-patch` structure, patch size, binary extensions, and configured path prefixes. Valid patches and `review_data.json` are copied into `.patch-staging/<date>/`.
 
-- **MATCH** (≥75%) — Same logical change landed correctly
-- **PARTIAL** (40–75%) — Change partially present; review side-by-side diff
-- **MISMATCH** (<40%) — Significant divergence; confirm intent with sender
-- **MISSING** — Sender touched this file but nothing landed
-- **EXTRA** — Receiver has changes in a file sender didn't touch (requires review; it is not an automatic pass)
+If any submitted patch is rejected, correct the bundle and rerun receive before continuing; later evidence covers only accepted patches. Use `--force` only to replace the **entire** date session. This prevents stale patches or evidence from being reused.
 
-Integration requires every result to be `MATCH`; `PARTIAL`, `MISMATCH`, `MISSING`, and `EXTRA` produce `NEEDS REVIEW`.
-
-### Step 4 — Run Tests
+### 2. Apply on a review branch
 
 ```bash
-python python/patch_test.py --no-prompt --silicon-result PENDING
-# or: bash bash/patch_test.sh --no-prompt --silicon-result PENDING
+python python/patch_apply.py --repo "$TARGET_REPO" --date "$DATE"
 ```
 
-Runs build + unit tests automatically. `--no-prompt` makes skill/CI execution deterministic; provide `--silicon-result PASS|FAIL|PENDING|SKIP` when a hardware result is available.
+Creates `review/<date>/<slug>` from the configured base and applies the series with `git am --3way`. The immutable base commit and full applied commit hashes are recorded in `apply_data.json`.
 
-### Step 5 — Generate Report & Integrate
+### 3. Check functional equivalence
 
 ```bash
-python python/patch_report.py     # creates REVIEW_REPORT.md and REVIEW_REPORT.html
-python python/patch_integrate.py --approval-file /path/to/approval.json
-# or: bash bash/patch_integrate.sh --approval-file /path/to/approval.json
+python python/patch_check.py --repo "$TARGET_REPO" --date "$DATE"
 ```
 
-Integration is noninteractive and fail-closed. It requires a complete apply, `check_data.json` with every file `MATCH` and no `EXTRA`, `test_data.json` with no `FAIL`/`TIMEOUT`/`ERROR`, and an approval JSON record tied to the exact review branch commit set and report SHA-256. `PENDING`/`SKIPPED` results remain visible; the scoped approval owner decides whether they are acceptable. The integration step includes every commit unique to the review branch, including post-apply cleanup or conflict-resolution commits, then pushes an `integrate/<date>/<slug>` branch and opens a GitHub PR via `gh`. If `gh` is not installed, it prints the equivalent command.
+Compares the sender's patch with the receiver's actual branch diff:
 
-An approval email is acceptable as the human approval source only when the skill exports its immutable message metadata into this JSON shape (do not use a bare `LGTM` or an unscoped yes/no):
+| Result | Meaning | Integration |
+|---|---|---|
+| `MATCH` | At least 75% similarity; intended change is present | Allowed |
+| `PARTIAL` | 40–75% similarity | Blocked |
+| `MISMATCH` | Below 40% similarity | Blocked |
+| `MISSING` | Sender changed a file; receiver did not | Blocked |
+| `EXTRA` | Receiver changed a file absent from the patch | Blocked |
+
+The overall result is `PASS` only when **every** file is `MATCH`.
+
+### 4. Run tests
+
+```bash
+python python/patch_test.py --repo "$TARGET_REPO" --date "$DATE" --no-prompt --silicon-result PENDING
+```
+
+Runs configured build and unit-test commands with a timeout. An empty command is recorded as `SKIPPED` and remains visible to the approval owner; configure both commands when validation is required. Noninteractive runs record silicon testing as `PENDING` unless an explicit result is supplied.
+
+### 5. Report, approve, and integrate
+
+```bash
+python python/patch_report.py --repo "$TARGET_REPO" --date "$DATE"
+python python/patch_integrate.py --repo "$TARGET_REPO" --date "$DATE" --approval-file /path/to/approval.json
+```
+
+The report is generated as both `REVIEW_REPORT.md` and `REVIEW_REPORT.html`. Integration creates `integrate/<date>/<slug>` from the recorded base branch, cherry-picks every reviewed commit, pushes the branch, and opens a pull request through `gh`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Skill as Pipeline skill
+    participant Scripts as Pipeline scripts
+    participant Reviewer as Approval owner
+    participant GitHub
+
+    Skill->>Scripts: Run receive, apply, check, test
+    Scripts-->>Skill: Persist JSON evidence
+    Skill->>Scripts: Generate review report
+    Scripts-->>Reviewer: Report + exact branch and commits
+    Reviewer-->>Skill: Scoped approval email metadata
+    Skill->>Scripts: Validate approval.json
+    alt All gates match
+        Scripts->>GitHub: Push integrate branch
+        Scripts->>GitHub: Open pull request
+    else Evidence is missing or changed
+        Scripts-->>Skill: Block integration with reason
+    end
+```
+
+The approval record must use this shape:
 
 ```json
 {
@@ -117,32 +191,73 @@ An approval email is acceptable as the human approval source only when the skill
   "message_id": "<mail-message-id>",
   "sender": "sender@example.com",
   "approved_at": "2026-09-15T15:00:00+08:00",
-  "review_branch": "review/2026-03-26/fix-timing",
-  "commit_shas": ["<full-review-commit-sha>"],
+  "review_branch": "review/2026-09-15/fix-timing",
+  "commit_shas": ["<full-40-character-commit-sha>"],
   "report_file": "REVIEW_REPORT.html",
-  "report_sha256": "<64-hex-sha256>"
+  "report_sha256": "<64-character-sha256>"
 }
 ```
 
-The validator stores the verified record as `.patch-staging/<date>/approval_data.json` and includes the approval sender/message ID in the PR body.
+After validation, the pipeline writes the verified provenance to `approval_data.json`.
 
----
+## Evidence and branch model
+
+```mermaid
+flowchart TB
+    Base["Base branch<br/>main or release/*"]
+    Review["review/date/slug<br/>patches + cleanup commits"]
+    Integrate["integrate/date/slug<br/>verified commits only"]
+    PR["Pull request"]
+
+    Base --> Review
+    Base --> Integrate
+    Review -. "validated commit sequence" .-> Integrate
+    Integrate --> PR
+    PR --> Base
+```
+
+| Artifact | Produced by | Purpose |
+|---|---|---|
+| `review_data.json` | Receive | Patch metadata, warnings, notes |
+| `apply_data.json` | Apply | Base commit, review branch, applied commits |
+| `check_data.json` | Check | Per-file equivalence and strict overall result |
+| `test_data.json` | Test | Build, unit, and silicon results |
+| `REVIEW_REPORT.md/.html` | Report | Human-readable review package |
+| `approval_data.json` | Integrate gate | Verified approval provenance |
+| `integrate_data.json` | Integrate | Integration branch and pull-request result |
+
+## Repository map
+
+```text
+patch-pipeline/
+├── python/                  # Primary deterministic implementation
+│   ├── approval.py         # Fail-closed evidence and approval validator
+│   ├── config.py           # TOML and environment configuration
+│   ├── patch_*.py          # Five workflow stages
+│   └── utils.py            # Git, schema, and patch helpers
+├── bash/                    # Compatible shell entry points
+├── skills/public/
+│   └── bios-patch-pipeline # Human-facing orchestration
+├── tests/                   # Unit and git-backed workflow tests
+├── README.md
+└── README_CN.md
+```
 
 ## Troubleshooting
 
-| Problem | Fix |
-|---------|-----|
-| `git am` conflict | Fix files, `git add`, `git am --continue`. Or `git am --abort`. |
-| Cherry-pick conflict | Fix files, `git add`, `git cherry-pick --continue`. Or `--abort`. |
-| `gh pr create` failed | Ensure `gh auth login` is done. Or run the printed fallback command manually. |
-| MISMATCH in check | Review side-by-side output. Confirm with sender if functionally equivalent. |
-| MISSING file | Check `git am` log and re-apply manually if needed. |
-| EXTRA files | Requires review; receiver changed files not present in the sender patch. |
-| Integration blocked | Inspect `approval.py` output; all technical evidence and exact approval scope must match. |
-| Stale patches after `--force` | `--force` now replaces the complete date session; re-run receive and apply. |
+| Symptom | Action |
+|---|---|
+| `git am` conflict | Resolve and stage files with `git add`, then run `git am --continue`. The saved apply evidence remains incomplete; prepare a corrected patch set, abort/delete the review branch, and rerun apply before integration. |
+| Equivalence is not `PASS` | Inspect the per-file result; correct or explicitly resubmit the patch. |
+| Build/unit test is `FAIL`, `TIMEOUT`, or `ERROR` | Fix the failure and rerun the test stage. |
+| Approval is rejected | Regenerate approval metadata for the exact report hash and current commit list. |
+| `gh pr create` fails | Authenticate with `gh auth login`, then run the printed command. |
+| Old evidence remains | Rerun receive with `--force` to replace the complete date session. |
 
-## Running Tests
+## Development
 
 ```bash
 python -m pytest tests/ -v
+python -m py_compile python/*.py
+bash -n bash/*.sh
 ```
