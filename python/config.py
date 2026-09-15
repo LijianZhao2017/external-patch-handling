@@ -10,12 +10,17 @@ Loads settings from (in priority order):
 from __future__ import annotations
 
 import os
-import sys
 
-if sys.version_info < (3, 11):
-    raise SystemExit("patch-pipeline requires Python 3.11+ (for tomllib). "
-                     "Upgrade Python or install 'tomli' as a fallback.")
-import tomllib
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib  # Python < 3.11 backport
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "patch-pipeline needs a TOML parser on Python < 3.11. "
+            "Install the backport with: python -m pip install tomli"
+        ) from exc
 from dataclasses import dataclass, field
 from pathlib import Path
 

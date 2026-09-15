@@ -2,7 +2,7 @@
 
 [中文文档](README_CN.md)
 
-> **Requirements:** Python 3.11+, git (receiver side only)
+> **Requirements:** Python 3.9+ (3.11+ recommended — uses built-in `tomllib`; on 3.9/3.10 install the `tomli` backport), git (receiver side only)
 
 ```bash
 python -m pip install -r requirements-dev.txt

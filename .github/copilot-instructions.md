@@ -37,7 +37,7 @@ The system has dual implementations: Python scripts and bash alternatives. Both 
 ## Build, Test & Lint
 
 ### Requirements
-- Python 3.11+ (for tomllib; backport available with `tomli`)
+- Python 3.9+ (3.11+ uses the built-in `tomllib`; 3.9/3.10 auto-falls back to the `tomli` package, which must be installed)
 - git (for git operations)
 - Standard Unix tools (bash scripts only)
 

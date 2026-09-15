@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-> **环境要求：** Python 3.11+，git（仅接收方需要）
+> **环境要求：** Python 3.9+（推荐 3.11+ — 使用内置的 `tomllib`；3.9/3.10 需安装 `tomli` 后备库），git（仅接收方需要）
 
 ```bash
 python -m pip install -r requirements-dev.txt
